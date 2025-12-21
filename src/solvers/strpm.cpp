@@ -628,13 +628,13 @@ floor_log2 (unsigned long long x)
 }
 
 void
-STRPMSolver::run(int n_bits, int depth, int player)
+STRPMSolver::run(int t_val, int k_val, int depth, int player)
 {
     // Marcin's word: think of h as the number of priorities of the
     // opponent... PLUS ONE!
-    t = n_bits;
+    t = t_val;
     h = depth + 1;  // FIXME: This is Guillermo's hack, the +1
-    k = std::min(n_bits + 2, h);  // Maybe possible: std::min(t + 2, h);
+    k = k_val;  // Maybe possible: std::min(t + 2, h);
 
     logger << "Strahler-tree parameters for player " << player << ": k = " << k << ", t = " << t << ", h = " << h << std::endl;
 
@@ -741,9 +741,11 @@ STRPMSolver::run()
     int max_prio = priority(nodecount()-1);
 
     // compute ml (max l) and the h for even/odd
-    int ml = floor_log2(nodecount());
+    int t_max = floor_log2(nodecount());
     int h0 = (max_prio/2)+1;
     int h1 = (max_prio+1)/2;
+
+    int k_max = std::min(t_max + 2, std::max(h0, h1));
 
     // create datastructures
     Q.resize(nodecount());
@@ -751,51 +753,79 @@ STRPMSolver::run()
     unstable.resize(nodecount());
 
     // if running bounded STRPM, start with 1-bounded adaptive counters
-    int i = bounded ? 1 : ml;
+    int i = bounded ? 1 : t_max;
 
-    for (; i<=ml; i++) {
-        int _l = lift_count, _a = lift_attempt;
-        uint64_t _c = game.count_unsolved(), c;
+    std::vector<std::pair<int, int>> value_pairs;
 
-        if (ODDFIRST) {
-            // run odd counters
-            run(i, h1, 1);
-            c = game.count_unsolved();
-            logger << "after odd  with i=" << i << ", " << std::setw(9) << lift_count-_l << " lifts, " << std::setw(9) << lift_attempt-_a << " lift attempts, " << c << " unsolved left." << std::endl;
+#ifndef NDEBUG
+    logger << "Max t: " << t_max << ", max k: " << k_max << std::endl;
+#endif
+    for (int k_val = 1; k_val <= k_max; ++k_val) {
+        for (int t_val = 1; t_val <= t_max; ++t_val) {
+            // Step 1: Check if we already solved the game for something that is dominated by the current one
+            if (std::any_of(value_pairs.begin(), value_pairs.end(), [k_val, t_val](const auto& p) {
+                return p.first <= k_val and p.second <= t_val;
+            } ))
+            {
+#ifndef NDEBUG
+                if (trace >= 2) logger << "Skipping " << k_val << ", " << t_val << std::endl;
+#endif
+                continue;
+            }
 
-            // if now solved, no need to run odd counters
-            if (c == 0) break;
+            // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
+            // game.reset_solution();
+            int lift_count = 0, lift_attempt = 0;
+            uint64_t c;
 
-            // run even counters
-            run(i, h0, 0);
-            c = game.count_unsolved();
-            logger << "after even with i=" << i << ", " << std::setw(9) << lift_count-_l << " lifts, " << std::setw(9) << lift_attempt-_a << " lift attempts, " << c << " unsolved left." << std::endl;
-        } else {
-            // run even counters
-            run(i, h0, 0);
-            c = game.count_unsolved();
-            logger << "after even with i=" << i << ", " << std::setw(9) << lift_count-_l << " lifts, " << std::setw(9) << lift_attempt-_a << " lift attempts, " << c << " unsolved left." << std::endl;
+            // Step 3: Actually do the solving
+            if (ODDFIRST) {
+                // run odd counters
+                run(t_val, k_val, h1, 1);
+                c = game.count_unsolved();
+                logger << "after odd  with i=" << i << ", " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
 
-            // if now solved, no need to run odd counters
-            if (c == 0) break;
+                // if now solved, no need to run odd counters
+                if (c != 0)
+                {
+                    // run even counters
+                    run(t_val, k_val, h0, 0);
+                    c = game.count_unsolved();
+                    logger << "after even with i=" << i << ", " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
+                }
+                
+            } else {
+                // run even counters
+                run(t_val, k_val, h0, 0);
+                c = game.count_unsolved();
+                logger << "after even with i=" << i << ", " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
 
-            // run odd counters
-            run(i, h1, 1);
-            c = game.count_unsolved();
-            logger << "after odd  with i=" << i << ", " << std::setw(9) << lift_count-_l << " lifts, " << std::setw(9) << lift_attempt-_a << " lift attempts, " << c << " unsolved left." << std::endl;
-        }
+                // if now solved, no need to run odd counters
+                if (c == 0) break;
 
-        if (i != ml) {
-            // if i == ml then we are guaranteed to be done
-            // otherwise check if done
-            if (c == 0) break;
-            if (_c != c) i--; // do not increase i if we solved vertices with current i
-        } else {
-            break; // do not count higher pls
+                // run odd counters
+                run(t_val, k_val, h1, 1);
+                c = game.count_unsolved();
+                logger << "after odd  with i=" << i << ", " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
+            }
+
+            // Step 4: Check whether we solved the game
+            if (c == 0)
+            {
+                // Add the successful pair to the collection
+                value_pairs.emplace_back(k_val, t_val);
+                logger << "solved with " << lift_count << " lifts, " << lift_attempt << " lift attempts." << std::endl;
+            }
         }
     }
 
-    logger << "solved with " << lift_count << " lifts, " << lift_attempt << " lift attempts, max l " << i << "." << std::endl;
+    logger << "Minimal (k, t)- pairs: ";
+    for (auto &&p : value_pairs)
+    {
+        logger << "(" << p.first << ", " << p.second << ") ";
+    }
+    logger << std::endl;
+    
 }
 
 }
