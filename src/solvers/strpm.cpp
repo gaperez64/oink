@@ -18,6 +18,7 @@
 #include <unordered_set>
 #include <queue>
 #include <boost/functional/hash.hpp>
+#include <stack>
 
 #include "strpm.hpp"
 
@@ -640,6 +641,111 @@ floor_log2 (unsigned long long x)
     return y;
 }
 
+struct Node
+{
+    int k;
+    int t;
+    int h;
+    bool isU;
+};
+
+unsigned tree_size(int k, int t, int h) 
+{
+    std::vector<std::vector<std::vector<unsigned>>> treeU (k + 1, std::vector<std::vector<unsigned>>(t + 1, std::vector<unsigned>(h + 1)));
+    std::vector<std::vector<std::vector<unsigned>>> treeV (k + 1, std::vector<std::vector<unsigned>>(t + 1, std::vector<unsigned>(h + 1)));
+    std::stack<Node> stack;
+
+    stack.push ({k, t, h, true});
+    while (!stack.empty())
+    {
+        Node& tos = stack.top();
+        if (tos.isU and tos.h == 1 and tos.k == 1)
+        {
+            treeU[tos.k][tos.t][tos.h - 1] = 1;
+            stack.pop ();
+        }
+        else if (tos.isU and tos.h > 1 and tos.k == 1)
+        {
+            unsigned son = treeU[tos.k][tos.t][tos.h - 1];
+            if (son > 0)
+            {
+                treeU[tos.k][tos.t][tos.h] = son;
+                stack.pop ();
+            }
+            else stack.push ({tos.k, tos.t, tos.h - 1, true});
+        }
+        else if (tos.h >= tos.k and tos.k >= 2 and tos.t == 0)
+        {
+            unsigned son = treeU[tos.k - 1][tos.t][tos.h - 1];
+            if (son > 0)
+            {
+                if (tos.isU) treeU[tos.k][tos.t][tos.h] = son;
+                else treeV[tos.k][tos.t][tos.h] = son;
+                stack.pop ();
+            }
+            else stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
+        }
+        else if (!tos.isU and tos.h >= tos.k and tos.k >= 2 and tos.t >= 1)
+        {
+            unsigned son1 = treeV[tos.k][tos.t - 1][tos. h];
+            unsigned son2 = treeU[tos.k - 1][tos.t][tos.h - 1];
+            if (son1 > 0 and son2 > 0)
+            {
+                treeV[tos.k][tos.t][tos.h] = son1 * 2 + son2;
+                stack.pop ();
+            }
+            else
+            {
+                stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
+                stack.push ({tos.k, tos.t - 1, tos.h, false});
+            }
+        }
+        else if (tos.isU and tos.h == tos.k and tos.k >= 2)
+        {
+            unsigned son = treeV[tos.k][tos.t][tos.h];
+            if (son > 0) 
+            {
+                treeU[tos.k][tos.t][tos.h] = son;
+                stack.pop ();
+            }
+            else stack.push ({tos.k, tos.t, tos.h, false});
+        }
+        else if (tos.isU and tos.h > tos.k and tos.k >= 2)
+        {
+            unsigned son1 = treeV[tos.k][tos.t][tos.h];
+            unsigned son2 = treeU[tos.k][tos.t][tos.h - 1];
+            if (son1 > 0 and son2 > 0)
+            {
+                treeU[tos.k][tos.t][tos.h] = son1 * 2 + son2;
+                stack.pop ();
+            }
+            else
+            {
+                stack.push ({tos.k, tos.t, tos.h - 1, true});
+                stack.push ({tos.k, tos.t, tos.h, false});
+            }
+        }
+        else assert(false); // We should never get here
+    }
+    
+    return treeU[k][t][h];
+}
+
+struct SizeCompare
+{
+    int h;
+
+    bool operator()(const std::pair<int,int>& lhs,
+                    const std::pair<int,int>& rhs) const 
+    {
+        auto lhs_size = tree_size(lhs.first, lhs.second, h);
+        auto rhs_size = tree_size(rhs.first, rhs.second, h);
+        
+        return lhs_size > rhs_size;
+    }
+};
+
+
 void
 STRPMSolver::run(int t_val, int k_val, int depth, int player)
 {
@@ -760,7 +866,8 @@ STRPMSolver::run()
     int h0 = (max_prio/2)+1;
     int h1 = (max_prio+1)/2;
 
-    int k_max = std::min(t_max + 2, std::max(h0, h1));
+    int h_max = std::max(h0, h1);
+    int k_max = std::min(t_max + 2, h_max);
 
     // create datastructures
     Q.resize(nodecount());
@@ -774,6 +881,14 @@ STRPMSolver::run()
         RatioCompare
     > pq;
     pq.push({1, 1});
+    /*
+    To use SizeCompare:
+    std::priority_queue<
+        std::pair<int,int>,
+        std::vector<std::pair<int,int>>,
+        SizeCompare
+    > pq { SizeCompare { h_max } };
+    */
 
     // Keep track of already tried combinations
     std::unordered_set<std::pair<int, int>, boost::hash<std::pair<int, int>>> already_tried;
