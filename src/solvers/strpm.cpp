@@ -669,7 +669,7 @@ unsigned tree_size(int k, int t, int h)
         Node& tos = stack.top();
         if (tos.isU and tos.h == 1 and tos.k == 1)
         {
-            treeU[std::make_tuple(tos.k, tos.t, tos.h - 1)] = 1;
+            treeU[std::make_tuple(tos.k, tos.t, tos.h)] = 1;
             stack.pop ();
         }
         else if (tos.isU and tos.h > 1 and tos.k == 1)
