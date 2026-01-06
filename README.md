@@ -250,3 +250,27 @@ Typical options are:
 - `--dot <dotfile>` writes a .dot file of the game as loaded.
 - `-p` writes the vertices won by even/odd to stdout.
 - `-t` (once or multiple times) increases verbosity level.
+
+## Usage in Docker
+
+The Dockerfile in the main directory of this project can be used to build a simple Docker image that runs the Oink tool on a set of games.
+
+Build the image using:
+```
+docker build -t oink .
+```
+
+To then run the image:
+```
+docker run [--rm] -v <local directory>:/usr/inputs oink <solver> <timeout>
+```
+* *Local directory*: A (relative) path to a directory containing the games. Oink will be executed once for every game in the directory provided here.
+* *Solver*: The solver Oink is going to use (see list displayed when calling --help), for example `zlk` or `strpm`
+* *Timeout*: The timeout after which to abort the solving attempt (per game!) = parameter `-z`
+
+Example:
+```
+docker run -v ./benchmarks:/usr/inputs oink zlk 60
+```
+
+The output will be the filename of the input file followed by the Oink output for every file in the given directory.
