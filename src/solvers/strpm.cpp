@@ -15,10 +15,12 @@
  */
 
 #include <iomanip>
+#include <unordered_map>
 #include <unordered_set>
 #include <queue>
 #include <boost/functional/hash.hpp>
 #include <stack>
+#include <utility>
 
 #include "strpm.hpp"
 
@@ -649,10 +651,16 @@ struct Node
     bool isU;
 };
 
+
+// Keep track of already computed sizes, this is cached beyond single calls of
+// tree_size below
+std::unordered_map<std::tuple<int, int, int>, unsigned,
+                   boost::hash<std::tuple<int, int, int>>> treeU;
+std::unordered_map<std::tuple<int, int, int>, unsigned,
+                   boost::hash<std::tuple<int, int, int>>> treeV;
+
 unsigned tree_size(int k, int t, int h) 
 {
-    std::vector<std::vector<std::vector<unsigned>>> treeU (k + 1, std::vector<std::vector<unsigned>>(t + 1, std::vector<unsigned>(h + 1)));
-    std::vector<std::vector<std::vector<unsigned>>> treeV (k + 1, std::vector<std::vector<unsigned>>(t + 1, std::vector<unsigned>(h + 1)));
     std::stack<Node> stack;
 
     stack.push ({k, t, h, true});
@@ -661,37 +669,37 @@ unsigned tree_size(int k, int t, int h)
         Node& tos = stack.top();
         if (tos.isU and tos.h == 1 and tos.k == 1)
         {
-            treeU[tos.k][tos.t][tos.h - 1] = 1;
+            treeU[std::make_tuple(tos.k, tos.t, tos.h - 1)] = 1;
             stack.pop ();
         }
         else if (tos.isU and tos.h > 1 and tos.k == 1)
         {
-            unsigned son = treeU[tos.k][tos.t][tos.h - 1];
-            if (son > 0)
+            auto son = treeU.find(std::make_tuple(tos.k, tos.t, tos.h - 1)); 
+            if (son != treeU.end())
             {
-                treeU[tos.k][tos.t][tos.h] = son;
+                treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
                 stack.pop ();
             }
             else stack.push ({tos.k, tos.t, tos.h - 1, true});
         }
         else if (tos.h >= tos.k and tos.k >= 2 and tos.t == 0)
         {
-            unsigned son = treeU[tos.k - 1][tos.t][tos.h - 1];
-            if (son > 0)
+            auto son = treeU.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
+            if (son != treeU.end())
             {
-                if (tos.isU) treeU[tos.k][tos.t][tos.h] = son;
-                else treeV[tos.k][tos.t][tos.h] = son;
+                if (tos.isU) treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
+                else treeV[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
                 stack.pop ();
             }
             else stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
         }
         else if (!tos.isU and tos.h >= tos.k and tos.k >= 2 and tos.t >= 1)
         {
-            unsigned son1 = treeV[tos.k][tos.t - 1][tos. h];
-            unsigned son2 = treeU[tos.k - 1][tos.t][tos.h - 1];
-            if (son1 > 0 and son2 > 0)
+            auto son1 = treeV.find(std::make_tuple(tos.k, tos.t - 1, tos. h));
+            auto son2 = treeU.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
+            if (son1 != treeV.end() and son2 != treeU.end())
             {
-                treeV[tos.k][tos.t][tos.h] = son1 * 2 + son2;
+                treeV[std::make_tuple(tos.k, tos.t, tos.h)] = son1->second * 2 + son2->second;
                 stack.pop ();
             }
             else
@@ -702,21 +710,21 @@ unsigned tree_size(int k, int t, int h)
         }
         else if (tos.isU and tos.h == tos.k and tos.k >= 2)
         {
-            unsigned son = treeV[tos.k][tos.t][tos.h];
-            if (son > 0) 
+            auto son = treeV.find(std::make_tuple(tos.k, tos.t, tos.h));
+            if (son != treeV.end()) 
             {
-                treeU[tos.k][tos.t][tos.h] = son;
+                treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
                 stack.pop ();
             }
             else stack.push ({tos.k, tos.t, tos.h, false});
         }
         else if (tos.isU and tos.h > tos.k and tos.k >= 2)
         {
-            unsigned son1 = treeV[tos.k][tos.t][tos.h];
-            unsigned son2 = treeU[tos.k][tos.t][tos.h - 1];
-            if (son1 > 0 and son2 > 0)
+            auto son1 = treeV.find(std::make_tuple(tos.k, tos.t, tos.h));
+            auto son2 = treeU.find(std::make_tuple(tos.k, tos.t, tos.h - 1));
+            if (son1 != treeV.end() and son2 != treeU.end())
             {
-                treeU[tos.k][tos.t][tos.h] = son1 * 2 + son2;
+                treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son1->second * 2 + son2->second;
                 stack.pop ();
             }
             else
@@ -728,7 +736,7 @@ unsigned tree_size(int k, int t, int h)
         else assert(false); // We should never get here
     }
     
-    return treeU[k][t][h];
+    return treeU[std::make_tuple(k, t, h)];
 }
 
 struct SizeCompare
