@@ -869,6 +869,8 @@ STRPMSolver::run()
 {
     int max_prio = priority(nodecount()-1);
 
+    logger << "Max Prio: " << max_prio <<std::endl;
+
     // compute ml (max l) and the h for even/odd
     int t_max = floor_log2(nodecount());
     int h0 = (max_prio/2)+1;
@@ -908,11 +910,11 @@ STRPMSolver::run()
     while (!pq.empty()) {
         // Step 1: Get values
         auto [k_val, t_val] = pq.top();
-        pq.pop();
+        
 
         // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
         lift_count = 0, lift_attempt = 0;
-        uint64_t c;
+        uint64_t c, c_old = game.count_unsolved();
 
         // Step 3: Actually do the solving
         if (ODDFIRST) {
@@ -959,20 +961,26 @@ STRPMSolver::run()
             logger << "Solved with k = " << k_val << ", t = " << t_val << std::endl;
             break;
         }
-        else if (k_val < k_max or t_val < t_max)
+        else if (c == c_old)
         {
-            std::pair<int, int> candidate {k_val + 1, t_val};
-            if (k_val + 1 <= k_max and already_tried.find(candidate) == already_tried.end()) 
-            {
-                pq.push(candidate);
-                already_tried.insert(candidate);
-            }
+            // We did not solve anything new - remove this set of params
+            pq.pop();
 
-            candidate = { k_val, t_val + 1 };
-            if (t_val + 1 <= t_max and already_tried.find(candidate) == already_tried.end()) 
+            if (k_val < k_max or t_val < t_max)
             {
-                pq.push(candidate);
-                already_tried.insert(candidate);
+                std::pair<int, int> candidate {k_val + 1, t_val};
+                if (k_val + 1 <= k_max and already_tried.find(candidate) == already_tried.end()) 
+                {
+                    pq.push(candidate);
+                    already_tried.insert(candidate);
+                }
+
+                candidate = { k_val, t_val + 1 };
+                if (t_val + 1 <= t_max and already_tried.find(candidate) == already_tried.end()) 
+                {
+                    pq.push(candidate);
+                    already_tried.insert(candidate);
+                }
             }
         }
     }
