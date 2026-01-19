@@ -39,7 +39,7 @@ set(OINK_HDRS
     include/oink/libpopcnt.h
 )
 
-target_compile_features(oink PUBLIC c_std_17 cxx_std_17)
+target_compile_features(oink PUBLIC c_std_17 cxx_std_20)
 
 target_compile_options(oink PRIVATE
     $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:GNU>>:
@@ -111,7 +111,7 @@ set_target_properties(oink PROPERTIES PUBLIC_HEADER "${OINK_HDRS}")
 
 # Common target properties
 macro(set_target_props NAME)
-    target_compile_features(${NAME} PUBLIC c_std_17 cxx_std_17)
+    target_compile_features(${NAME} PUBLIC c_std_17 cxx_std_20)
     target_compile_options(${NAME} PRIVATE -Wall -Wextra)
     target_include_directories(${NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${Boost_INCLUDE_DIRS})
     target_link_libraries(${NAME} oink::oink)

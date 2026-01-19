@@ -196,9 +196,15 @@ STRPMSolver::prog_tmp(int pindex, int h)
 #ifndef NDEBUG
                 if (trace >= 2) logger <<  "Smaller than t\n";
 #endif
-                int new_index = i == tmp_d.size() - 1 ? tmp_d[i] : tmp_d[i+1] - 1;
+                int new_index = std::cmp_equal(i+1, tmp_d.size()) ? tmp_d[i] : tmp_d[i+1] - 1;
+                
                 i ++;
-                if ((i + t - nlb + 1)  > tmp_b.size())
+
+                // Either we add the one at the end of the existing string, which means we add one NLB, or we add a NES!
+                if (i != 0 and tmp_d[i-1] == tmp_d[i]) nlb++;
+                else nes++;
+                
+                if (std::cmp_greater(i + t - nlb + 1, tmp_b.size()))
                 {
                     tmp_b.insert(tmp_b.end(), t - nlb, 0);
                     tmp_b[i] = 1;
@@ -210,8 +216,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
                 {
                     tmp_b[i] = 1;
                     tmp_d[i] = new_index;
-                    if (i != 0 and tmp_d[i-1] == tmp_d[i]) nlb++;
-                    else nes++;
+                    
                     int j = 1;
                     while (nlb + j <= t) 
                     {
@@ -323,9 +328,9 @@ STRPMSolver::prog_tmp(int pindex, int h)
     #ifndef NDEBUG
         if (trace >= 2) logger << "Needed nes: " << no_of_needed_nes << std::endl;
     #endif
-        while (tmp_b.size() - i >= no_of_needed_nes) 
+        while (std::cmp_greater_equal(tmp_b.size(), i + no_of_needed_nes))
         {
-            assert (i >= 0 && i < tmp_d.size());
+            assert (i >= 0 and std::cmp_less(i, tmp_d.size()));
             tmp_d[i] = set_index;
             i ++;
         }
@@ -333,7 +338,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
         if (trace >= 2) logger << "Filling singles\n";
 #endif
         // Now assign the rest of the bits one level a piece
-        while (i < tmp_b.size())
+        while (std::cmp_less(i, tmp_b.size()))
         {
             set_index ++;
             assert (set_index < h);
