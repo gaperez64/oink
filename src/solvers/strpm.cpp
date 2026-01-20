@@ -201,19 +201,30 @@ STRPMSolver::prog_tmp(int pindex, int h)
                 i ++;
 
                 // Either we add the one at the end of the existing string, which means we add one NLB, or we add a NES!
-                if (i != 0 and tmp_d[i-1] == tmp_d[i]) nlb++;
-                else nes++;
+                bool isNewString = false;
+                if (i != 0 and (i == tmp_d.size() or tmp_d[i-1] == tmp_d[i])) nlb++;
+                else {
+                    nes++;
+                    isNewString = true;
+                }
                 
                 if (std::cmp_greater(i + t - nlb + 1, tmp_b.size()))
                 {
-                    tmp_b.insert(tmp_b.end(), t - nlb, 0);
+#ifndef NDEBUG
+                    if (trace >= 2) logger <<  "Resizing to fit bits\n";
+#endif
+                    size_t newBits = t - nlb + 1;
+                    tmp_b.insert(tmp_b.end(), newBits, 0);
                     tmp_b[i] = 1;
                     for (size_t j = i; j < tmp_d.size(); j++) tmp_d[j] = new_index;
-                    tmp_d.insert(tmp_d.end(), t - nlb, new_index);
-                    i += t - nlb;
+                    tmp_d.insert(tmp_d.end(), newBits, new_index);
+                    i += newBits;
                 }
                 else 
                 {
+#ifndef NDEBUG
+                  if (trace >= 2) logger <<  "Adding bits\n";
+#endif
                     tmp_b[i] = 1;
                     tmp_d[i] = new_index;
                     
