@@ -63,6 +63,7 @@ protected:
 
     void solve(int node, int winner, int strategy) { oink.solve(node, winner, strategy); }
     void flush() { oink.flush(); }
+    void reset() { oink.disabled.reset(); }
 
 private:
     Oink& oink;
