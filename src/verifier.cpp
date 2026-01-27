@@ -39,6 +39,7 @@ Verifier::verify(bool fullgame, bool even, bool odd)
     game.build_in_array(false);
 
     const int n_vertices = game.vertexcount();
+    logger << "n_vertices " << n_vertices << std::endl;
 
     /**
      * The first loop removes all edges from "won" vertices that are not the strategy.
@@ -124,8 +125,9 @@ Verifier::verify(bool fullgame, bool even, bool odd)
              */
             if (low[v] <= bot) {
                 low[v] = ++pre;
-                res.push_back(v);
             }
+            // FIXED? This was inside the if
+            res.push_back(v);
 
             /**
              * Now we check all outgoing (allowed) edges.
@@ -142,6 +144,7 @@ Verifier::verify(bool fullgame, bool even, bool odd)
                     // skip if already found scc (done[to] set to prio)
                 } else if (low[to] <= bot) {
                     // not visited, add to <st> and break!
+                    //logger << " edge " << game.label_vertex(v) << " -> " << game.label_vertex(to) << std::endl;
                     st.push(to);
                     pushed = true;
                 } else {
@@ -158,6 +161,7 @@ Verifier::verify(bool fullgame, bool even, bool odd)
                     // check if visited in this search
                     if (low[to] <= bot) {
                         // not visited, add to <st> and break!
+                        //logger << " edge " << game.label_vertex(v) << " -> " << game.label_vertex(to) << std::endl;
                         st.push(to);
                         pushed = true;
                         break;
@@ -201,6 +205,10 @@ Verifier::verify(bool fullgame, bool even, bool odd)
                 /**
                  * Found! Report.
                  */
+                logger << "max_prio " << max_prio << " and prio " << prio << std::endl;
+                logger << "scc_size " << scc_size << std::endl;
+                logger << "plays a loop? " << (game.getStrategy(v) == v) << std::endl;
+                logger << "implicit loop? " << (game.getStrategy(v) == -1 and game.has_edge(v, v)) << std::endl;;
                 logger << "\033[1;31mscc where loser wins\033[m with priority \033[1;34m" << max_prio << "\033[m";
                 for (auto it=res.rbegin(); it!=res.rend(); it++) {
                     int n = *it;
