@@ -112,7 +112,7 @@ STRPMSolver::trunc_tmp(int pindex)
 int 
 STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i) 
 {
-    while ((i >= 0 && curr_d[i] == curr_d[i+1]) || i == curr_d.size() - 1) 
+    while ((i == curr_d.size() - 1) || (i >= 0 && curr_d[i] == curr_d[i+1])) 
     {
         tmp_b[i] = 0;
         i --;
