@@ -38,6 +38,9 @@ void HoodOf(pg::Game& game, int src, std::ostream& logger) {
     int to = *curedge;
     logger << game.label_vertex(to) << ",";
   }
+  int strat = game.getStrategy(src);
+  if (strat != -1)
+    logger << " {strat says " << game.label_vertex(strat) << "}";
   logger << std::endl;
 }
 
@@ -78,7 +81,9 @@ processSCC(pg::Game& game,
            << max_prio << "\033[m\n";
     for (auto it = res.rbegin(); it != res.rend(); it++) {
       int n = *it;
-      logger << " " << game.label_vertex(n);
+      logger << " (winner " << game.getWinner(n) << ", owner "
+             << game.owner(n) << ", prio " << game.priority(n)
+             << ") " << game.label_vertex(n);
       HoodOf(game, n, logger);
       if (n == v)
         break;
