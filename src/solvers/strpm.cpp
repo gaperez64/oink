@@ -948,7 +948,9 @@ STRPMSolver::run()
         uint64_t c;
         //game.reset_solution();
         //reset();
+#ifndef NDEBUG
         logger << "Currently unsolved: " << game.count_unsolved() << std::endl;
+#endif
 
         // Step 3: Actually do the solving
         if (ODDFIRST) {
