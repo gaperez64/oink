@@ -47,6 +47,37 @@ struct RatioCompare {
     }
 };
 
+constexpr inline size_t binom(size_t n, size_t k) noexcept
+{
+    return
+      (        k> n  )? 0 :          // out of range
+      (k==0 || k==n  )? 1 :          // edge
+      (k==1 || k==n-1)? n :          // first
+      (     k+k < n  )?              // recursive:
+      (binom(n-1,k-1) * n)/k :       //  path to k=1   is faster
+      (binom(n-1,k) * n)/(n-k);      //  path to k=n-1 is faster
+}
+
+struct ApproxSizeCompare {
+    int h;
+
+    int approxSize(int k, int t) const 
+    {
+        if (k == 1) return 1;
+
+        return (1 << (k + t)) * binom(t + k - 2, k + 2) * binom(h - 1, k - 1);
+    }
+
+    bool operator()(const std::pair<int,int>& lhs,
+                    const std::pair<int,int>& rhs) const 
+    {
+        auto lhs_size = approxSize(lhs.first, lhs.second);
+        auto rhs_size = approxSize(rhs.first, rhs.second);
+
+        return lhs_size > rhs_size;
+    }
+};
+
 void
 STRPMSolver::to_tmp(int idx)
 {
@@ -903,7 +934,8 @@ STRPMSolver::run()
         std::pair<int,int>,
         std::vector<std::pair<int,int>>,
         RatioCompare
-    > pq;
+        //ApproxSizeCompare
+    > pq { };
     pq.push({1, 1});
     /*
     To use SizeCompare:
