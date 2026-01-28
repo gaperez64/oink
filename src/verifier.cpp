@@ -31,7 +31,8 @@ using namespace std;
 
 namespace {
 
-void HoodOf(pg::Game& game, int src, std::ostream& logger) {
+void
+HoodOf(pg::Game& game, int src, std::ostream& logger) {
   logger << "=> ";
   for (const int* curedge = game.outs(src); *curedge != -1;
        curedge++) {
@@ -117,21 +118,21 @@ tarjanSearch(pg::Game& game, bool even, bool odd, std::ostream& logger)
     if (!game.isSolved(top))
       continue;
 
-    int prio = game.priority(top);
-    int winner = game.getWinner(top);
+    const int prio_top = game.priority(top);
+    const int winner_top = game.getWinner(top);
 
     // only compute SCC for a (probably) top vertex
-    if (winner == 0 and !even)
+    if (winner_top == 0 and !even)
       continue; // don't check even dominions
-    if (winner == 1 and !odd)
+    if (winner_top == 1 and !odd)
       continue; // don't check odd dominions
 
     // only try to find an SCC where the loser wins
-    if (winner == (prio & 1))
+    if (winner_top == (prio_top & 1))
       continue;
 
     // only run the check if not yet done at priority <prio>
-    if (done[top] == prio)
+    if (done[top] == prio_top)
       continue;
 
     // set <bot> (in tarjan search) to current pre
@@ -168,15 +169,14 @@ tarjanSearch(pg::Game& game, bool even, bool odd, std::ostream& logger)
            curedge++) {
         int to = *curedge;
         // skip if to higher priority
-        if (game.priority(to) > prio)
+        if (game.priority(to) > prio_top)
           continue;
         // skip if already found scc (done[to] set to prio)
-        if (done[to] == prio)
+        if (done[to] == prio_top)
           continue;
         // check if visited in this search
         if (low[to] <= bot) {
           // not visited, add to <st> and break!
-          // logger << " edge " << game.label_vertex(v) << " -> " <<
           // game.label_vertex(to) << std::endl;
           st.push(to);
           pushed = true;
@@ -204,7 +204,7 @@ tarjanSearch(pg::Game& game, bool even, bool odd, std::ostream& logger)
        * Now we need to figure out if we have cycles with p...
        * Also, mark every vertex in the SCC as "done @ search p"
        */
-      if (processSCC(game, res, logger, done, v, prio)) {
+      if (processSCC(game, res, logger, done, v, prio_top)) {
         delete[] done;
         delete[] low;
 
