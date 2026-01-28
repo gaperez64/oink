@@ -317,7 +317,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
             i = 0;
             tmp_b[i] = 1;
             // TODO: maybe find more elegant way to avoid setting the index too high as opposed to starting out one lower...
-            tmp_d[i] = tmp_d[i] - 2;
+            tmp_d[i] = std::min(tmp_d[i], pindex+1) - 2;
             skipLevel = true;
             nes--;
         }
