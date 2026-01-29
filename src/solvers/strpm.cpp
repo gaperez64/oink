@@ -319,9 +319,9 @@ STRPMSolver::prog_tmp(int pindex, int h)
             tmp_b[i] = 1;
             // TODO: maybe find more elegant way to avoid setting the index too high as opposed to starting out one lower...
             tmp_d[i] = std::min(tmp_d[i], pindex+1) - 2;
-            if (std::cmp_greater(t + nes + 1, tmp_b.size()))
+            if (std::cmp_greater(t + k - 1, tmp_b.size()))
             {
-                size_t newBits = t + nes + 1 - tmp_d.size();
+                size_t newBits = t + k - 1 - tmp_d.size();
 #ifndef NDEBUG
                 if (trace >= 2) logger << "Vector too small, appending " << newBits << "bits\n";
 #endif
