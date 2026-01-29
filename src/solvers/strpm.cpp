@@ -212,9 +212,10 @@ STRPMSolver::prog_tmp(int pindex, int h)
 #endif
                 }
                 
-                if (std::cmp_greater(i + t - nlb + 1, tmp_b.size()))
+                int total_nes = std::min((nes + h - 1 - new_index), k - 1);
+                if (std::cmp_greater(total_nes + t, tmp_b.size()))
                 {
-                    size_t newBits = t - nlb + 1 - (tmp_d.size() - i);
+                    size_t newBits = total_nes + t - tmp_d.size();
 #ifndef NDEBUG
                     if (trace >= 2) logger <<  "Resizing to fit bits (" << newBits << " additional bits)\n";
 #endif
@@ -318,6 +319,16 @@ STRPMSolver::prog_tmp(int pindex, int h)
             tmp_b[i] = 1;
             // TODO: maybe find more elegant way to avoid setting the index too high as opposed to starting out one lower...
             tmp_d[i] = std::min(tmp_d[i], pindex+1) - 2;
+            if (std::cmp_greater(t + nes + 1, tmp_b.size()))
+            {
+                size_t newBits = t + nes + 1 - tmp_d.size();
+#ifndef NDEBUG
+                if (trace >= 2) logger << "Vector too small, appending " << newBits << "bits\n";
+#endif
+                tmp_b.insert(tmp_b.end(), newBits, 0);
+                for (size_t j = i; j < tmp_d.size(); j++) tmp_d[j] = tmp_d[i];
+                tmp_d.insert(tmp_d.end(), newBits, tmp_d[i]);
+            }
             skipLevel = true;
             nes--;
         }
