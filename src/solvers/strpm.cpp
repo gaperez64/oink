@@ -983,7 +983,9 @@ STRPMSolver::run()
     logger << "Max t: " << t_max << ", max k: " << k_max << std::endl;
 #endif
     
+    size_t iterations = 0;
     while (!pq.empty()) {
+        iterations++;
         // Step 1: Get values
         auto [k_val, t_val] = pq.top();
         
@@ -1040,6 +1042,7 @@ STRPMSolver::run()
         {
             // We can stop, everything is solved!
             logger << "Solved with k = " << k_val << ", t = " << t_val << std::endl;
+            logger << "Took " << iterations << " iterations" << std::endl;
             break;
         }
         else if (c == c_old)
