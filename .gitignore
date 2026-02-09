@@ -4,3 +4,4 @@ debug/
 tests/dot/
 *.DS_Store
 keiren/
+extra/

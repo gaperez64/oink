@@ -47,6 +47,37 @@ struct RatioCompare {
     }
 };
 
+constexpr inline size_t binom(size_t n, size_t k) noexcept
+{
+    return
+      (        k> n  )? 0 :          // out of range
+      (k==0 || k==n  )? 1 :          // edge
+      (k==1 || k==n-1)? n :          // first
+      (     k+k < n  )?              // recursive:
+      (binom(n-1,k-1) * n)/k :       //  path to k=1   is faster
+      (binom(n-1,k) * n)/(n-k);      //  path to k=n-1 is faster
+}
+
+struct ApproxSizeCompare {
+    int h;
+
+    int approxSize(int k, int t) const 
+    {
+        if (k == 1) return 1;
+
+        return (1 << (k + t)) * binom(t + k - 2, k + 2) * binom(h - 1, k - 1);
+    }
+
+    bool operator()(const std::pair<int,int>& lhs,
+                    const std::pair<int,int>& rhs) const 
+    {
+        auto lhs_size = approxSize(lhs.first, lhs.second);
+        auto rhs_size = approxSize(rhs.first, rhs.second);
+
+        return lhs_size > rhs_size;
+    }
+};
+
 void
 STRPMSolver::to_tmp(int idx)
 {
@@ -99,10 +130,11 @@ STRPMSolver::trunc_tmp(int pindex)
     // compute the lowest pindex >= p
     // [pindex],.,...,.. => [pindex],000
     // if pindex is the bottom, then this simply "buries" the remainder
-    for (int i=tmp_d.size()-1; i>=0 and tmp_d[i] > pindex; i--) {
-        tmp_b[i] = 0;
-        tmp_d[i] = pindex+1;
-    }
+    int  i=tmp_d.size()-1;
+    while (i>=0 and tmp_d[i] > pindex) i--;
+    tmp_b.resize(i + 1);
+    tmp_d.resize(i + 1);
+    assert ((tmp_d.size() - std::unordered_set<int>(tmp_d.begin(), tmp_d.end()).size()) <= t);
 }
 
 /**
@@ -111,7 +143,7 @@ STRPMSolver::trunc_tmp(int pindex)
 int 
 STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i) 
 {
-    while ((i >= 0 && curr_d[i] == curr_d[i+1]) || i == curr_d.size() - 1) 
+    while ((i == curr_d.size() - 1) || (i >= 0 && curr_d[i] == curr_d[i+1])) 
     {
         tmp_b[i] = 0;
         i --;
@@ -129,7 +161,6 @@ STRPMSolver::prog_tmp(int pindex, int h)
     if (tmp_d[0] == -1) return; // already Top
 
     bool skipLevel = false;
-    assert (*std::max_element(tmp_d.begin(), tmp_d.end()) < h-1);
     int i = tmp_d.size() - 1;
 #ifndef NDEBUG
     if (trace >= 2) 
@@ -144,11 +175,12 @@ STRPMSolver::prog_tmp(int pindex, int h)
         {
             logger << loc;
         }
-        logger << std::endl;
+        logger << " with k = " << k << ", t = " << t << std::endl;
     logger << "Start i in " << i << std::endl;
-    logger << "Skipping bits below p\n";
+    logger << "Skipping bits below p " << pindex << std::endl;
     }
 #endif
+    assert (*std::max_element(tmp_d.begin(), tmp_d.end()) < h-1);
     // skip bits "below p"
     while (i >= 0 && tmp_d[i] > pindex) 
     {
@@ -196,22 +228,43 @@ STRPMSolver::prog_tmp(int pindex, int h)
 #ifndef NDEBUG
                 if (trace >= 2) logger <<  "Smaller than t\n";
 #endif
-                int new_index = i == tmp_d.size() - 1 ? tmp_d[i] : tmp_d[i+1] - 1;
+                int new_index = std::min(std::cmp_equal(i+1, tmp_d.size()) ? tmp_d[i] : tmp_d[i+1] - 1, pindex);
+                assert(new_index < h-1);
                 i ++;
-                if ((i + t - nlb + 1)  > tmp_b.size())
+
+                // Either we add the one at the end of the existing string, which means we add one NLB, or we add a NES!
+                bool isNewString = false;
+                if (i != 0 and (i == tmp_d.size() or tmp_d[i-1] == new_index)) nlb++;
+                else {
+                    nes++;
+                    isNewString = true;
+#ifndef NDEBUG
+                    if (trace >= 2) logger <<  "Appending to an empty string...\n";
+#endif
+                }
+                
+                int total_nes = std::min((nes + h - 1 - new_index), k - 1);
+                if (std::cmp_greater(total_nes + t, tmp_b.size()))
                 {
-                    tmp_b.insert(tmp_b.end(), t - nlb, 0);
+                    size_t newBits = total_nes + t - tmp_d.size();
+#ifndef NDEBUG
+                    if (trace >= 2) logger <<  "Resizing to fit bits (" << newBits << " additional bits)\n";
+#endif
+                    
+                    tmp_b.insert(tmp_b.end(), newBits, 0);
                     tmp_b[i] = 1;
                     for (size_t j = i; j < tmp_d.size(); j++) tmp_d[j] = new_index;
-                    tmp_d.insert(tmp_d.end(), t - nlb, new_index);
-                    i += t - nlb;
+                    tmp_d.insert(tmp_d.end(), newBits, new_index);
+                    i += t - nlb + 1;
                 }
                 else 
                 {
+#ifndef NDEBUG
+                  if (trace >= 2) logger <<  "Adding bits\n";
+#endif
                     tmp_b[i] = 1;
                     tmp_d[i] = new_index;
-                    if (i != 0 and tmp_d[i-1] == tmp_d[i]) nlb++;
-                    else nes++;
+                    
                     int j = 1;
                     while (nlb + j <= t) 
                     {
@@ -296,7 +349,17 @@ STRPMSolver::prog_tmp(int pindex, int h)
             i = 0;
             tmp_b[i] = 1;
             // TODO: maybe find more elegant way to avoid setting the index too high as opposed to starting out one lower...
-            tmp_d[i] = tmp_d[i] - 2;
+            tmp_d[i] = std::min(tmp_d[i], pindex+1) - 2;
+            if (std::cmp_greater(t + k - 1, tmp_b.size()))
+            {
+                size_t newBits = t + k - 1 - tmp_d.size();
+#ifndef NDEBUG
+                if (trace >= 2) logger << "Vector too small, appending " << newBits << "bits\n";
+#endif
+                tmp_b.insert(tmp_b.end(), newBits, 0);
+                for (size_t j = i; j < tmp_d.size(); j++) tmp_d[j] = tmp_d[i];
+                tmp_d.insert(tmp_d.end(), newBits, tmp_d[i]);
+            }
             skipLevel = true;
             nes--;
         }
@@ -311,7 +374,10 @@ STRPMSolver::prog_tmp(int pindex, int h)
     }
     #endif
     
-    int no_of_needed_nes = (k-1) - (nes+1);
+    // We can only fill as many NES as we have height... Too many empty strings "in the middle" = less tham k-1 strings total
+    int available_nes = h - 1 - (tmp_d[(skipLevel ? i : i-1)] + 1);
+    int no_of_needed_nes = std::min((k-1) - (nes+1), available_nes);
+    
     if (no_of_needed_nes == 0) {
         // special case: Don't add anything, remove everything after the current position
         tmp_d.resize(i);
@@ -321,11 +387,15 @@ STRPMSolver::prog_tmp(int pindex, int h)
         int set_index = tmp_d[(skipLevel ? i : i-1)] + 1;
         // Fill up with just the next one as long as we still have bits
     #ifndef NDEBUG
-        if (trace >= 2) logger << "Needed nes: " << no_of_needed_nes << std::endl;
+        if (trace >= 2) logger << "Needed nes: " << no_of_needed_nes << ", available levels: " << available_nes << std::endl;
     #endif
-        while (tmp_b.size() - i >= no_of_needed_nes) 
+        while (std::cmp_greater_equal(tmp_b.size(), i + no_of_needed_nes))
         {
-            assert (i >= 0 && i < tmp_d.size());
+            assert (i >= 0 and std::cmp_less(i, tmp_d.size()));
+            assert(set_index < h-1);
+#ifndef NDEBUG
+            if (trace >= 2) logger << "Set bit " << i << " to " << set_index << std::endl;
+#endif
             tmp_d[i] = set_index;
             i ++;
         }
@@ -333,14 +403,19 @@ STRPMSolver::prog_tmp(int pindex, int h)
         if (trace >= 2) logger << "Filling singles\n";
 #endif
         // Now assign the rest of the bits one level a piece
-        while (i < tmp_b.size())
+        while (std::cmp_less(i, tmp_b.size()))
         {
             set_index ++;
-            assert (set_index < h);
+#ifndef NDEBUG
+            if (trace >= 2) logger << "Set bit " << i << " to " << set_index << std::endl;
+#endif
+            assert (set_index < h-1);
             tmp_d[i] = set_index;
             i ++;
         }
     }
+    // Assert that the number of NLB is at most t
+    assert ((tmp_d.size() - std::unordered_set<int>(tmp_d.begin(), tmp_d.end()).size()) <= t);
 }
 
 /**
@@ -512,7 +587,7 @@ STRPMSolver::lift(int v, int target, int &str, int pl)
             }
 #endif
         if (pl == (pr&1)) prog_tmp(pindex, h);
-        else trunc_tmp(pindex);
+        //else trunc_tmp(pindex);
 #ifndef NDEBUG
             if (trace >= 2) {
                 stream_tmp(logger, h);
@@ -549,7 +624,7 @@ STRPMSolver::lift(int v, int target, int &str, int pl)
         }
 #endif
         if (pl == (pr&1)) prog_tmp(pindex, h);
-        else trunc_tmp(pindex);
+        //else trunc_tmp(pindex);
 #ifndef NDEBUG
         if (trace >= 2) {
             stream_tmp(logger, h);
@@ -889,7 +964,8 @@ STRPMSolver::run()
         std::pair<int,int>,
         std::vector<std::pair<int,int>>,
         RatioCompare
-    > pq;
+        //ApproxSizeCompare
+    > pq { };
     pq.push({1, 1});
     /*
     To use SizeCompare:
@@ -915,6 +991,11 @@ STRPMSolver::run()
         // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
         lift_count = 0, lift_attempt = 0;
         uint64_t c, c_old = game.count_unsolved();
+        //game.reset_solution();
+        //reset();
+#ifndef NDEBUG
+        logger << "Currently unsolved: " << game.count_unsolved() << std::endl;
+#endif
 
         // Step 3: Actually do the solving
         if (ODDFIRST) {
