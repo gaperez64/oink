@@ -730,88 +730,171 @@ struct Node
 // Keep track of already computed sizes, this is cached beyond single calls of
 // tree_size below
 std::unordered_map<std::tuple<int, int, int>, unsigned,
-                   boost::hash<std::tuple<int, int, int>>> treeU;
+                   boost::hash<std::tuple<int, int, int>>>
+    treeU;
 std::unordered_map<std::tuple<int, int, int>, unsigned,
-                   boost::hash<std::tuple<int, int, int>>> treeV;
+                   boost::hash<std::tuple<int, int, int>>>
+    treeV;
 
-unsigned tree_size(int k, int t, int h) 
+unsigned tree_size(int k, int t, int h, bool isU) {
+  // Check for cache hit
+  auto& requested_tree = isU ? treeU : treeV;
+  auto cached = requested_tree.find(std::make_tuple(k, t, h));
+  if (cached != treeV.end()) {
+    return cached->second;
+  }
+  
+  std::stack<Node> stack;
+
+  stack.push({k, t, h, isU});
+  while (!stack.empty()) {
+    Node &tos = stack.top();
+    if (tos.isU and tos.h == 1 and tos.k == 1) {
+      treeU[std::make_tuple(tos.k, tos.t, tos.h)] = 1;
+      stack.pop();
+    } else if (tos.isU and tos.h > 1 and tos.k == 1) {
+      auto son = treeU.find(std::make_tuple(tos.k, tos.t, tos.h - 1));
+      if (son != treeU.end()) {
+        treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
+        stack.pop();
+      } else
+        stack.push({tos.k, tos.t, tos.h - 1, true});
+    } else if (tos.h >= tos.k and tos.k >= 2 and tos.t == 0) {
+      auto son = treeU.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
+      if (son != treeU.end()) {
+        if (tos.isU)
+          treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
+        else
+          treeV[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
+        stack.pop();
+      } else
+        stack.push({tos.k - 1, tos.t, tos.h - 1, true});
+    } else if (!tos.isU and tos.h >= tos.k and tos.k >= 2 and tos.t >= 1) {
+      auto son1 = treeV.find(std::make_tuple(tos.k, tos.t - 1, tos.h));
+      auto son2 = treeU.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
+      if (son1 != treeV.end() and son2 != treeU.end()) {
+        treeV[std::make_tuple(tos.k, tos.t, tos.h)] =
+            son1->second * 2 + son2->second;
+        stack.pop();
+      } else {
+        stack.push({tos.k - 1, tos.t, tos.h - 1, true});
+        stack.push({tos.k, tos.t - 1, tos.h, false});
+      }
+    } else if (tos.isU and tos.h == tos.k and tos.k >= 2) {
+      auto son = treeV.find(std::make_tuple(tos.k, tos.t, tos.h));
+      if (son != treeV.end()) {
+        treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
+        stack.pop();
+      } else
+        stack.push({tos.k, tos.t, tos.h, false});
+    } else if (tos.isU and tos.h > tos.k and tos.k >= 2) {
+      auto son1 = treeV.find(std::make_tuple(tos.k, tos.t, tos.h));
+      auto son2 = treeU.find(std::make_tuple(tos.k, tos.t, tos.h - 1));
+      if (son1 != treeV.end() and son2 != treeU.end()) {
+        treeU[std::make_tuple(tos.k, tos.t, tos.h)] =
+            son1->second * 2 + son2->second;
+        stack.pop();
+      } else {
+        stack.push({tos.k, tos.t, tos.h - 1, true});
+        stack.push({tos.k, tos.t, tos.h, false});
+      }
+    } else
+      assert(false); // We should never get here
+  }
+
+  return isU ? treeU[std::make_tuple(k, t, h)] : treeV[std::make_tuple(k, t, h)];
+}
+
+std::pair<std::vector<bool>, std::vector<int>> label_lth_leaf(int k, int t, int h, int lth)
 {
-    std::stack<Node> stack;
+  std::pair<std::vector<bool>, std::vector<int>> leaf;
+  Node node { k, t, h, true };
+  int lth_tmp = lth;
+    assert (lth < tree_size(k, t, h, true));
 
-    stack.push ({k, t, h, true});
-    while (!stack.empty())
+  while (true)
+  {
+    if (node.isU and node.k == 1)
     {
-        Node& tos = stack.top();
-        if (tos.isU and tos.h == 1 and tos.k == 1)
-        {
-            treeU[std::make_tuple(tos.k, tos.t, tos.h)] = 1;
-            stack.pop ();
-        }
-        else if (tos.isU and tos.h > 1 and tos.k == 1)
-        {
-            auto son = treeU.find(std::make_tuple(tos.k, tos.t, tos.h - 1)); 
-            if (son != treeU.end())
-            {
-                treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                stack.pop ();
-            }
-            else stack.push ({tos.k, tos.t, tos.h - 1, true});
-        }
-        else if (tos.h >= tos.k and tos.k >= 2 and tos.t == 0)
-        {
-            auto son = treeU.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
-            if (son != treeU.end())
-            {
-                if (tos.isU) treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                else treeV[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                stack.pop ();
-            }
-            else stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
-        }
-        else if (!tos.isU and tos.h >= tos.k and tos.k >= 2 and tos.t >= 1)
-        {
-            auto son1 = treeV.find(std::make_tuple(tos.k, tos.t - 1, tos. h));
-            auto son2 = treeU.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
-            if (son1 != treeV.end() and son2 != treeU.end())
-            {
-                treeV[std::make_tuple(tos.k, tos.t, tos.h)] = son1->second * 2 + son2->second;
-                stack.pop ();
-            }
-            else
-            {
-                stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
-                stack.push ({tos.k, tos.t - 1, tos.h, false});
-            }
-        }
-        else if (tos.isU and tos.h == tos.k and tos.k >= 2)
-        {
-            auto son = treeV.find(std::make_tuple(tos.k, tos.t, tos.h));
-            if (son != treeV.end()) 
-            {
-                treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                stack.pop ();
-            }
-            else stack.push ({tos.k, tos.t, tos.h, false});
-        }
-        else if (tos.isU and tos.h > tos.k and tos.k >= 2)
-        {
-            auto son1 = treeV.find(std::make_tuple(tos.k, tos.t, tos.h));
-            auto son2 = treeU.find(std::make_tuple(tos.k, tos.t, tos.h - 1));
-            if (son1 != treeV.end() and son2 != treeU.end())
-            {
-                treeU[std::make_tuple(tos.k, tos.t, tos.h)] = son1->second * 2 + son2->second;
-                stack.pop ();
-            }
-            else
-            {
-                stack.push ({tos.k, tos.t, tos.h - 1, true});
-                stack.push ({tos.k, tos.t, tos.h, false});
-            }
-        }
-        else assert(false); // We should never get here
+      assert (lth_tmp == 1);
+      // Just empty string... (We can combine case 1 and 2 from the C)
+      break;
     }
-    
-    return treeU[std::make_tuple(k, t, h)];
+    else if (node.h >= node.k and node.k >= 2 and node.t == 0)
+    {
+      if (node.isU)
+      {
+        leaf.first.push_back(0);
+        leaf.second.push_back(h - node.h); // Double check!
+      }
+      node.isU = true;
+      node.k--;
+      node.h--;
+    }
+    else if (!node.isU and node.h >= node.k and node.k >= 2 and node.t >= 1)
+    {
+      unsigned size_child1 = tree_size(node.k, node.t - 1, node.h, false);
+      unsigned size_child2 = tree_size(node.k - 1, node.t, node.h - 1, true);
+      if (size_child1 >= lth_tmp)
+      {
+        leaf.first.push_back(0);
+        leaf.second.push_back(h - node.h); // Double check!
+        node.t--;
+        node.isU = false;
+      }
+      else if (size_child1 + size_child2 >= lth_tmp)
+      {
+        lth_tmp -= size_child1;
+        node.isU = true;
+        node.k--;
+        node.h--;
+      }
+      else
+      {
+        lth_tmp -= size_child1 + size_child2;
+        leaf.first.push_back(1);
+        leaf.second.push_back(h - node.h); // Double check!
+        node.isU = false;
+        node.t--;
+      }
+    }
+    else if (node.isU and node.h == node.k and node.k >= 2)
+    {
+      leaf.first.push_back(0);
+      leaf.second.push_back(h - node.h); // Double check!
+      node.isU = false;
+    }
+    else if (node.isU and node.h > node.k and node.k >= 2)
+    {
+      unsigned size_child1 = tree_size(node.k, node.t, node.h, false);
+      unsigned size_child2 = tree_size(node.k, node.t, node.h-1, true);
+      if (size_child1 >= lth_tmp)
+      {
+        leaf.first.push_back(0);
+        leaf.second.push_back(h - node.h); // Double check!
+        node.isU = false;
+      }
+      else if (size_child1 + size_child2 >= lth_tmp)
+      {
+        lth_tmp -= size_child1;
+        node.isU = true;
+        node.h--;
+      }
+      else 
+      {
+        lth_tmp -= size_child1 + size_child2;
+        leaf.first.push_back(1);
+        leaf.second.push_back(h - node.h); // Double check!
+        node.isU = false;
+      }
+    }
+    else 
+    {
+      assert (false);
+    }
+  }
+
+  return leaf;
 }
 
 struct SizeCompare
@@ -821,8 +904,8 @@ struct SizeCompare
     bool operator()(const std::pair<int,int>& lhs,
                     const std::pair<int,int>& rhs) const 
     {
-        auto lhs_size = tree_size(lhs.first, lhs.second, h);
-        auto rhs_size = tree_size(rhs.first, rhs.second, h);
+        auto lhs_size = tree_size(lhs.first, lhs.second, h, true);
+        auto rhs_size = tree_size(rhs.first, rhs.second, h, true);
         
         return lhs_size > rhs_size;
     }
@@ -830,7 +913,7 @@ struct SizeCompare
 
 
 void
-STRPMSolver::run(int t_val, int k_val, int depth, int player)
+STRPMSolver::run(int t_val, int k_val, int depth, int player, size_t start_from)
 {
     // Marcin's word: think of h as the number of priorities of the
     // opponent... PLUS ONE!
@@ -842,14 +925,24 @@ STRPMSolver::run(int t_val, int k_val, int depth, int player)
     logger << "Strahler-tree parameters for player " << player << ": k = " << k << ", t = " << t << ", h = " << h << std::endl;
 #endif
 
-    // initialize progress measures - Every node is set to the smallest leaf in the tree
-    pm_b = std::vector<std::vector<bool>> (nodecount(), std::vector<bool>(k-1+t, 0));
-    std::vector<int> initial_d (k-1+t, 0);
-    for (size_t i = t + 1; i < initial_d.size(); i++)
+    if (start_from == 0 or k == 1) 
     {
-        initial_d[i] = initial_d[i-1] + 1;
+        // initialize progress measures - Every node is set to the smallest leaf in the tree
+        pm_b = std::vector<std::vector<bool>> (nodecount(), std::vector<bool>(k-1+t, 0));
+        std::vector<int> initial_d (k-1+t, 0);
+        for (size_t i = t + 1; i < initial_d.size(); i++)
+        {
+            initial_d[i] = initial_d[i-1] + 1;
+        }
+        pm_d = std::vector<std::vector<int>> (nodecount(), initial_d);
     }
-    pm_d = std::vector<std::vector<int>> (nodecount(), initial_d);
+    else 
+    {
+        auto start = label_lth_leaf(k, t, h, start_from);
+        pm_b = std::vector<std::vector<bool>> (nodecount(), start.first);
+        pm_d = std::vector<std::vector<int>> (nodecount(), start.second);
+    }
+    
 
 #ifndef NDEBUG
     if (trace >= 1)
@@ -976,6 +1069,8 @@ STRPMSolver::run()
 
     // Keep track of already tried combinations
     std::unordered_set<std::pair<int, int>, boost::hash<std::pair<int, int>>> already_tried;
+    size_t old_size = 0;
+    size_t current_size = 0;
 
 #ifndef NDEBUG
     logger << "Max t: " << t_max << ", max k: " << k_max << std::endl;
@@ -986,55 +1081,60 @@ STRPMSolver::run()
         auto [k_val, t_val] = pq.top();
         pq.pop();
 
-        // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
-        lift_count = 0, lift_attempt = 0;
-        uint64_t c;
-        //game.reset_solution();
-        //reset();
+        current_size = tree_size(k_val, t_val, std::min(h0, h1) + 1, true) - 1;
+        bool solved = false;
+
+        if (current_size >= old_size)
+        {
+            // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
+            lift_count = 0, lift_attempt = 0;
+            //game.reset_solution();
+            //reset();
 #ifndef NDEBUG
-        logger << "Currently unsolved: " << game.count_unsolved() << std::endl;
+            logger << "Currently unsolved: " << game.count_unsolved() << std::endl;
 #endif
 
-        // Step 3: Actually do the solving
-        if (ODDFIRST) {
-            // run odd counters
-            run(t_val, k_val, h1, 1);
-            c = game.count_unsolved();
-#ifndef NDEBUG
-            logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
-            // if now solved, no need to run odd counters
-            if (c != 0)
-            {
-                // run even counters
-                run(t_val, k_val, h0, 0);
-                c = game.count_unsolved();
-#ifndef NDEBUG
-                logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
-            }
-            
-        } else {
-            // run even counters
-            run(t_val, k_val, h0, 0);
-            c = game.count_unsolved();
-#ifndef NDEBUG
-            logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
-            // if now solved, no need to run odd counters
-            if (c != 0)
-            {
+            // Step 3: Actually do the solving
+            if (ODDFIRST) {
                 // run odd counters
-                run(t_val, k_val, h1, 1);
-                c = game.count_unsolved();
+                run(t_val, k_val, h1, 1, old_size);
+                solved = game.count_unsolved() == 0;
 #ifndef NDEBUG
-                logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
+                logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, solved: " << std::boolalpha << solved << std::noboolalpha << std::endl;
 #endif
+                // if now solved, no need to run odd counters
+                if (!solved)
+                {
+                    // run even counters
+                    run(t_val, k_val, h0, 0, old_size);
+                    solved = game.count_unsolved() == 0;
+#ifndef NDEBUG
+                    logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, solved: " << std::boolalpha << solved << std::noboolalpha << std::endl;
+#endif
+                }
+                
+            } else {
+                // run even counters
+                run(t_val, k_val, h0, 0, old_size);
+                solved = game.count_unsolved() == 0;
+#ifndef NDEBUG
+                logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, solved: " << std::boolalpha << solved << std::noboolalpha << std::endl;
+#endif
+                // if now solved, no need to run odd counters
+                if (!solved)
+                {
+                    // run odd counters
+                    run(t_val, k_val, h1, 1, old_size);
+                    solved = game.count_unsolved() == 0;
+#ifndef NDEBUG
+                    logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, solved: " << std::boolalpha << solved << std::noboolalpha << std::endl;
+#endif
+                }
             }
         }
 
         // Step 4: Check whether we solved the game
-        if (c == 0)
+        if (solved)
         {
             // We can stop, everything is solved!
             logger << "Solved with k = " << k_val << ", t = " << t_val << std::endl;
@@ -1042,6 +1142,7 @@ STRPMSolver::run()
         }
         else if (k_val < k_max or t_val < t_max)
         {
+            old_size = current_size;
             std::pair<int, int> candidate {k_val + 1, t_val};
             if (k_val + 1 <= k_max and already_tried.find(candidate) == already_tried.end()) 
             {

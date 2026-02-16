@@ -113,7 +113,7 @@ protected:
     int lift_count = 0;
     int lift_attempt = 0;
 
-    void run(int t_val, int k_val, int depth, int player);
+    void run(int t_val, int k_val, int depth, int player, size_t start_from);
 };
 
 class BoundedSTRPMSolver : public STRPMSolver
