@@ -61,11 +61,14 @@ constexpr inline size_t binom(size_t n, size_t k) noexcept
 struct ApproxSizeCompare {
     int h;
 
-    int approxSize(int k, int t) const 
+    double approxSize(int k, int t) const 
     {
         if (k == 1) return 1;
 
-        return (1 << (k + t)) * binom(t + k - 2, k + 2) * binom(h - 1, k - 1);
+        double approximation = (k-1) * (std::log(static_cast<double>(h-1)/(k-1)) + 1) - 
+                               (std::log(2* M_PI * (k-1))/2) - ((k-1)*(k-1))/static_cast<double>(2*(h-1));
+    
+        return (k + t)*std::log(2.0) + std::log(binom(t + k - 2, k + 2)) + approximation;
     }
 
     bool operator()(const std::pair<int,int>& lhs,
