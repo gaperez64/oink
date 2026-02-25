@@ -154,6 +154,9 @@ STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i)
     return i;
 }
 
+std::unordered_map<std::pair<std::vector<bool>, std::vector<int>>, std::pair<std::vector<bool>, std::vector<int>>,
+                   boost::hash<std::pair<std::vector<bool>, std::vector<int>>>> successor_cache;
+
 /**
  * Set tmp := min { m | m >_p tmp }
  */
@@ -162,6 +165,17 @@ STRPMSolver::prog_tmp(int pindex, int h)
 {
     // Simple case 1: Top >_p Top
     if (tmp_d[0] == -1) return; // already Top
+
+    // Check for a cache hit
+    auto cache_key = std::make_pair(tmp_b, tmp_d);
+    auto cache_entry = successor_cache.find(cache_key);
+    if (cache_entry != successor_cache.end())
+    {
+        // We already know this! Return cached res
+        tmp_b = cache_entry->second.first;
+        tmp_d = cache_entry->second.second;
+        return;
+    }
 
     bool skipLevel = false;
     int i = tmp_d.size() - 1;
@@ -344,6 +358,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
             if (trace >= 2) logger << "We are at top\n";
 #endif
             tmp_d[0] = -1;
+            successor_cache.insert({ cache_key, std::make_pair(tmp_b, tmp_d) });
             return;
         }
         else
@@ -419,6 +434,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
     }
     // Assert that the number of NLB is at most t
     assert ((tmp_d.size() - std::unordered_set<int>(tmp_d.begin(), tmp_d.end()).size()) <= t);
+    successor_cache.insert ({ cache_key, std::make_pair(tmp_b, tmp_d) });
 }
 
 /**
@@ -835,6 +851,7 @@ struct SizeCompare
 void
 STRPMSolver::run(int t_val, int k_val, int depth, int player)
 {
+    successor_cache.clear();
     // Marcin's word: think of h as the number of priorities of the
     // opponent... PLUS ONE!
     t = t_val;
