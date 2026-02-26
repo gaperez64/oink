@@ -155,13 +155,8 @@ STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i)
     return i;
 }
 
-struct container_hash {
-    std::size_t operator()(std::vector<int> const& c) const {
-        return boost::hash_range(c.begin(), c.end());
-    }
-};
 std::unordered_map<std::vector<int>, std::pair<std::vector<bool>, std::vector<int>>,
-                    container_hash> successor_cache;
+                    boost::hash<std::vector<int>>> successor_cache;
 
 /**
  * Set tmp := min { m | m >_p tmp }
@@ -173,11 +168,12 @@ STRPMSolver::prog_tmp(int pindex, int h)
     if (tmp_d[0] == -1) return; // already Top
 
     // Check for a cache hit
-    std::vector<int> cache_key(tmp_d.size() + 1);
+    std::vector<int> cache_key(tmp_d.size() + 2);
     // Use the int representation of the bitstring
-    cache_key[0] = std::accumulate(tmp_b.begin(), tmp_b.end(), 0ull,
+    cache_key[0] = pindex;
+    cache_key[1] = std::accumulate(tmp_b.begin(), tmp_b.end(), 0ull,
                                 [](auto acc, auto bit) { return (acc << 1) | bit; });
-    std::copy(tmp_d.begin(), tmp_d.end(), cache_key.begin() + 1);
+    std::copy(tmp_d.begin(), tmp_d.end(), cache_key.begin() + 2);
     auto cache_entry = successor_cache.find(cache_key);
     if (cache_entry != successor_cache.end())
     {
