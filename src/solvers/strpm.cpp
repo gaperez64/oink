@@ -154,8 +154,9 @@ STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i)
     return i;
 }
 
-std::unordered_map<std::pair<std::vector<bool>, std::vector<int>>, std::pair<std::vector<bool>, std::vector<int>>,
-                   boost::hash<std::pair<std::vector<bool>, std::vector<int>>>> successor_cache;
+std::unordered_map<std::tuple<int, std::vector<bool>, std::vector<int>>, std::pair<std::vector<bool>, std::vector<int>>,
+                   boost::hash<std::tuple<int, std::vector<bool>, std::vector<int>>>
+                   > successor_cache;
 
 /**
  * Set tmp := min { m | m >_p tmp }
@@ -167,7 +168,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
     if (tmp_d[0] == -1) return; // already Top
 
     // Check for a cache hit
-    const auto cache_key = std::make_pair(tmp_b, tmp_d);
+    const auto cache_key = std::make_tuple(pindex, tmp_b, tmp_d);
     auto cache_entry = successor_cache.find(cache_key);
     if (cache_entry != successor_cache.end())
     {
@@ -434,7 +435,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
     }
     // Assert that the number of NLB is at most t
     assert ((tmp_d.size() - std::unordered_set<int>(tmp_d.begin(), tmp_d.end()).size()) <= t);
-    //successor_cache.insert ({ cache_key, std::make_pair(tmp_b, tmp_d) });
+    successor_cache.insert ({ cache_key, std::make_pair(tmp_b, tmp_d) });
 }
 
 /**
