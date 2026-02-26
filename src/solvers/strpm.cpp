@@ -21,6 +21,7 @@
 #include <boost/functional/hash.hpp>
 #include <stack>
 #include <utility>
+#include <numeric>
 
 #include "strpm.hpp"
 
@@ -154,8 +155,13 @@ STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i)
     return i;
 }
 
-std::unordered_map<std::pair<std::vector<bool>, std::vector<int>>, std::pair<std::vector<bool>, std::vector<int>>,
-                   boost::hash<std::pair<std::vector<bool>, std::vector<int>>>> successor_cache;
+struct container_hash {
+    std::size_t operator()(std::vector<int> const& c) const {
+        return boost::hash_range(c.begin(), c.end());
+    }
+};
+std::unordered_map<std::vector<int>, std::pair<std::vector<bool>, std::vector<int>>,
+                    container_hash> successor_cache;
 
 /**
  * Set tmp := min { m | m >_p tmp }
@@ -167,7 +173,11 @@ STRPMSolver::prog_tmp(int pindex, int h)
     if (tmp_d[0] == -1) return; // already Top
 
     // Check for a cache hit
-    auto cache_key = std::make_pair(tmp_b, tmp_d);
+    std::vector<int> cache_key(tmp_d.size() + 1);
+    // Use the int representation of the bitstring
+    cache_key[0] = std::accumulate(tmp_b.begin(), tmp_b.end(), 0ull,
+                                [](auto acc, auto bit) { return (acc << 1) | bit; });
+    std::copy(tmp_d.begin(), tmp_d.end(), cache_key.begin() + 1);
     auto cache_entry = successor_cache.find(cache_key);
     if (cache_entry != successor_cache.end())
     {
