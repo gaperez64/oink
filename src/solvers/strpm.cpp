@@ -965,9 +965,9 @@ STRPMSolver::run()
     std::priority_queue<
         std::pair<int,int>,
         std::vector<std::pair<int,int>>,
-        RatioCompare
-        //ApproxSizeCompare
-    > pq { };
+        //RatioCompare
+        ApproxSizeCompare
+    > pq { ApproxSizeCompare { h_max } };
     pq.push({1, 1});
     /*
     To use SizeCompare:
