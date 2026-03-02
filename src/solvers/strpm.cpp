@@ -25,6 +25,7 @@
 #include "strpm.hpp"
 
 #define ODDFIRST 1
+#define ALWAYS_RESET 0
 
 namespace pg {
 
@@ -983,6 +984,11 @@ STRPMSolver::run()
 #ifndef NDEBUG
     logger << "Max t: " << t_max << ", max k: " << k_max << std::endl;
 #endif
+
+#if ALWAYS_RESET
+    bitset initial_disabled { disabled };
+    bitset initial_solved { game.getSolved() };
+#endif
     
     while (!pq.empty()) {
         // Step 1: Get values
@@ -992,8 +998,12 @@ STRPMSolver::run()
         // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
         lift_count = 0, lift_attempt = 0;
         uint64_t c;
-        //game.reset_solution();
-        //reset();
+
+#if ALWAYS_RESET
+        game.reset_to_initial(initial_solved);
+        reset_to_initial(initial_disabled);
+#endif
+
 #ifndef NDEBUG
         logger << "Currently unsolved: " << game.count_unsolved() << std::endl;
 #endif

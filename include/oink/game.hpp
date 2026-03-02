@@ -424,6 +424,15 @@ public:
     }
 
     /**
+     * Reset the game to some state previously stored.
+     * @param init_solved bitset of solved vertices
+     */
+    void reset_to_initial(bitset init_solved)
+    {
+        solved = init_solved;
+    }
+
+    /**
      * Declare a vertex as solved, won by <winner> (0 or 1) with strategy <strategy>.
      * @param vertex the vertex to set as solved/won
      * @param winner the winner of the vertex, either 0 or 1

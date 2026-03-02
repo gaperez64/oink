@@ -53,7 +53,7 @@ protected:
     bitset dirty;
     bitset unstable;
 
-    bool bounded = false;
+    bool always_reset = false;
 
     int *cap; // caps!
     uint64_t *lift_counters;
@@ -116,11 +116,11 @@ protected:
     void run(int t_val, int k_val, int depth, int player);
 };
 
-class BoundedSTRPMSolver : public STRPMSolver
+class NaiveSTRPMSolver : public STRPMSolver
 {
 public:
-    BoundedSTRPMSolver(Oink& oink, Game& game) : STRPMSolver(oink, game) { bounded = true; }
-    virtual ~BoundedSTRPMSolver() { }
+    NaiveSTRPMSolver(Oink& oink, Game& game) : STRPMSolver(oink, game) { always_reset = true; }
+    virtual ~NaiveSTRPMSolver() { }
 };
 
 }
