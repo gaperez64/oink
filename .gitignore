@@ -1,6 +1,8 @@
 .vscode/
 build/
 debug/
+experimentalbuild/
+experimentaldebug/
 tests/dot/
 *.DS_Store
 keiren/
