@@ -131,14 +131,6 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     // Simple case 1: Top >_p Top
     if (tmp_levels[0] == -1) return; // already Top
 
-    if (k == 1) 
-    {
-        // Optimize this special case - If we try to lift in this case it's always top
-        tmp_bits = 0;
-        tmp_masks = 0;
-        tmp_levels.resize(1);
-        tmp_levels[0] = -1;
-    }
 
     simd_uint8_mask has_bits = (tmp_masks > 0);
     simd_uint8 nlb_counts { std::popcount(static_cast<uint8_t>(tmp_masks[0])) - has_bits[0] }; 
@@ -671,7 +663,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     pm_bits = std::vector<std::vector<uint8_t>> (nodecount(), std::vector<uint8_t>(8, 0));
     std::vector<uint8_t> initial_mask (8, 0);
     initial_mask[0] = (1 << (t+1)) - 1;
-    std::vector<int> initial_levels { 0 };
+    std::vector<int> initial_levels (k-1);
     for (size_t i = 1; i < k-1; i++)
     {
         initial_levels[i] = i;
