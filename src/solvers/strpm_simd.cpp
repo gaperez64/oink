@@ -131,6 +131,8 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     // Simple case 1: Top >_p Top
     if (tmp_levels[0] == -1) return; // already Top
 
+    // Simple case 2: k=1 always progresses to Top
+    if (k == 1) { tmp_levels[0] = -1; return; }
 
     simd_uint8_mask has_bits = (tmp_masks > 0);
     simd_uint8 nlb_counts { std::popcount(static_cast<uint8_t>(tmp_masks[0])) - has_bits[0] }; 
@@ -256,7 +258,7 @@ STRPM_SIMDSolver::stream_pm(std::ostream &out, int idx)
     } else {
         out << " { ";
         int output_level = 0;
-        for (int i=0; i<pm_levels.size(); i++) {
+        for (int i=0; i<(int)pm_levels[idx].size(); i++) {
             if (i>0) out << ", ";
             while (pm_levels[idx][i] > output_level)
             {
@@ -652,8 +654,9 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     h = depth + 1;  // FIXME: This is Guillermo's hack, the +1
     k = k_val;  // Maybe possible: std::min(t + 2, h);
 
-    tmp_levels.reserve(k-1);
-    best_levels.reserve(k-1);
+    // For k=1, use size-1 levels vector (sentinel for Top check); k>=2 uses k-1 entries
+    tmp_levels.reserve(std::max(1, k-1));
+    best_levels.reserve(std::max(1, k-1));
 
 #ifndef NDEBUG
     logger << "Strahler-tree parameters for player " << player << ": k = " << k << ", t = " << t << ", h = " << h << std::endl;
@@ -663,7 +666,9 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     pm_bits = std::vector<std::vector<uint8_t>> (nodecount(), std::vector<uint8_t>(8, 0));
     std::vector<uint8_t> initial_mask (8, 0);
     initial_mask[0] = (1 << (t+1)) - 1;
-    std::vector<int> initial_levels (k-1);
+    // For k=1: use a size-1 vector {0} as the "not Top" sentinel (Top = {-1})
+    // For k>=2: use k-1 entries at consecutive levels
+    std::vector<int> initial_levels (std::max(1, k-1), 0);
     for (size_t i = 1; i < k-1; i++)
     {
         initial_levels[i] = i;
@@ -784,7 +789,7 @@ STRPM_SIMDSolver::run()
         RatioCompare
         //ApproxSizeCompare
     > pq { };
-    pq.push({2, 1});
+    pq.push({1, 1});
     /*
     To use SizeCompare:
     std::priority_queue<
