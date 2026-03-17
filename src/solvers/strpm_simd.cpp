@@ -212,7 +212,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // There is an empty level we can use! 
             match ++; // We append to the next string
             tmp_bits[match] = 1; 
-            tmp_masks[match] = std::min(pindex, tmp_levels[match] - 1); // Move the empty string up to the next higher level
+            tmp_levels[match] = std::min(pindex, tmp_levels[match] - 1); // Move the empty string up to the next higher level
         }
         else 
         {
