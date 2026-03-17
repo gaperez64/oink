@@ -141,18 +141,15 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     }
     
     std::vector<int>& lvls = tmp_levels;
-    simd_uint8_mask smaller_than_p = simd_uint8 ([lvls](uint8_t i) { return i < lvls.size() ? lvls[i] : 0b11111111; }) <= simd_uint8{pindex};
+    simd_uint8_mask smaller_than_p = simd_uint8 ([lvls, pindex](uint8_t i) { return i < lvls.size() ? lvls[i] <= pindex : 0; }) == 1;
     simd_uint8 clear_first_bit(~simd_uint8{0} & ~1);
     simd_uint8 pattern_zero_and_ones = tmp_masks & clear_first_bit;
-    simd_uint8 strings_after ([lvls](uint8_t i) {
-        return static_cast<uint8_t>(lvls.size() - i);
-    });
-    simd_uint8 needed_after ([lvls, h](uint8_t i) {
-        return i < lvls.size() ? (h - lvls[i] - 1) : 0;
+    simd_uint8 all_filled_after ([lvls, h](uint8_t i) {
+        return i < lvls.size() ? (h - lvls[i] - 1) == (lvls.size() - i) : 0;
     });
     simd_uint8 nlb_before ([&nlb_counts](uint8_t i) { return i == 0 ? 0 : nlb_counts[i-1]; });
     simd_uint8_mask no_successor = has_bits and ((nlb_before == t) or ((nlb_counts == t) and (
-             ((tmp_bits == pattern_zero_and_ones) and (strings_after == needed_after)) // Third case
+             ((tmp_bits == pattern_zero_and_ones) and (all_filled_after == 1)) // Third case
           or (tmp_bits == tmp_masks))) // Fourth case
     );
     
@@ -190,6 +187,11 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         {
             nlb_counts[match] -= current_bits - std::popcount(static_cast<uint8_t>(tmp_masks[match]));
             match++;
+            if (match < k-1)
+            {
+                tmp_levels[match] = tmp_levels[match-1] + 1;
+                tmp_bits[match] = 0;
+            }            
         }
         else 
         {
@@ -224,7 +226,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     {
         // Add enough bits to fill t NLB
         int bits_before = match > 0 ? nlb_counts[match - 1] : 0;
-        tmp_masks[match] |= (1u << (t - bits_before + 1)) - 1;
+        tmp_masks[match] = (1u << (t - bits_before + 1)) - 1;
 
         // Now append the new strings
         tmp_levels.resize(match+1);
