@@ -143,14 +143,21 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     }
     
     std::vector<int>& lvls = tmp_levels;
-    simd_uint8_mask smaller_than_p = simd_uint8 ([lvls](uint8_t i) { return i < lvls.size() ? lvls[i] : 0b11111111; }) <= simd_uint8{pindex};
+    // Use int comparison to avoid uint8_t overflow when levels or pindex exceed 255 (h > 256)
+    simd_uint8_mask smaller_than_p {};
+    for (int i = 0; i < 8; i++) {
+        smaller_than_p[i] = (i < (int)lvls.size() && lvls[i] <= pindex);
+    }
     simd_uint8 clear_first_bit(~simd_uint8{0} & ~1);
     simd_uint8 pattern_zero_and_ones = tmp_masks & clear_first_bit;
-    simd_uint8 strings_after ([lvls](uint8_t i) {
+    simd_uint8 strings_after ([&lvls](uint8_t i) {
         return static_cast<uint8_t>(lvls.size() - i);
     });
-    simd_uint8 needed_after ([lvls, h](uint8_t i) {
-        return i < lvls.size() ? (h - lvls[i] - 1) : 0;
+    // Clamp to 255 to avoid uint8_t overflow when h - lvls[i] - 1 > 255 (h > 256)
+    simd_uint8 needed_after ([&lvls, h](uint8_t i) {
+        if (i >= (uint8_t)lvls.size()) return (uint8_t)0;
+        int val = h - lvls[i] - 1;
+        return static_cast<uint8_t>(val > 255 ? 255 : val);
     });
     simd_uint8 nlb_before ([&nlb_counts](uint8_t i) { return i == 0 ? 0 : nlb_counts[i-1]; });
     simd_uint8_mask no_successor = has_bits and ((nlb_before == t) or ((nlb_counts == t) and (
