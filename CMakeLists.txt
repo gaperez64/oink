@@ -63,7 +63,11 @@ target_link_libraries(oink PUBLIC pthread lace::lace)
 
 option(OINK_BUILD_NATIVE "Use -march=native flag for compiling Oink" ON)
 if(OINK_BUILD_NATIVE)
-    target_compile_options(oink PRIVATE "-march=native")
+    if(APPLE)
+        target_compile_options(oink PRIVATE -march=armv8.9-a)
+    else()
+        target_compile_options(oink PRIVATE -march=native)
+    endif()
 endif()
 
 target_sources(oink
@@ -122,6 +126,16 @@ add_executable(solve)
 target_sources(solve PRIVATE src/tools/solve.cpp src/tools/getrss.c)
 set_target_properties(solve PROPERTIES OUTPUT_NAME oink)
 set_target_props(solve)
+target_compile_options(solve PRIVATE
+    -O3
+    -mtune=native
+  )
+if(APPLE)
+    target_compile_options(solve PRIVATE -march=armv8.9-a)
+else()
+    target_compile_options(solve PRIVATE -march=native)
+endif()
+
 target_link_libraries(solve Boost::iostreams Boost::random)
 
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)

@@ -128,9 +128,17 @@ STRPM_SIMDSolver::tmp_to_best()
 void
 STRPM_SIMDSolver::prog_tmp(int pindex, int h)
 {
+    if (k == 1 and tmp_levels.size() == 0)
+    {
+        // We can immediately handle k = 1, it's just one branch and top
+        tmp_levels = { -1 };
+        tmp_bits = 0;
+        tmp_masks = 0;
+        return;
+    }
+
     // Simple case 1: Top >_p Top
     if (tmp_levels[0] == -1) return; // already Top
-
 
     simd_uint8_mask has_bits = (tmp_masks > 0);
     simd_uint8 nlb_counts { std::popcount(static_cast<uint8_t>(tmp_masks[0])) - has_bits[0] }; 
@@ -314,6 +322,15 @@ STRPM_SIMDSolver::stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& m
 int
 STRPM_SIMDSolver::compare(int pindex)
 {
+    if (k == 1)
+    {
+        // It is either empty or Top, so comparing sizes is enough
+        if (tmp_levels.size() == best_levels.size()) return 0;
+        else if (tmp_levels.size() > 0) return 1;
+        else if (best_levels.size() > 0) return -1;
+
+    }
+
     // cases involving Top
     if (tmp_levels[0] == -1 and best_levels[0] == -1) return 0;
     if (tmp_levels[0] == -1) return 1;
@@ -379,7 +396,7 @@ bool
 STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
 {
     // check if already Top
-    if (pm_levels[v][0] == -1) return false; // already Top
+    if (pm_levels[v].size() > 0 and pm_levels[v][0] == -1) return false; // already Top
 
     const int pr = priority(v);
     const int pindex = pl == 0 ? (h-1)-(pr+1)/2-1 : (h-1)-pr/2-1;
@@ -725,7 +742,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
 
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
-        if (pm_levels[v][0] != -1) {
+        if (pm_levels[v].size() == 0 or pm_levels[v][0] != -1) {
             if (owner(v) != player) {
                 // TODO: don't rely on the strategy array in the Game class
                 if (lift(v, -1, game.getStrategy()[v], player)) logger << "error: " << v << " is not progressive!" << std::endl;
@@ -740,7 +757,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
             logger << "\033[1m" << label_vertex(v) << (owner(v)?" (odd)":" (even)") << "\033[m:";
             stream_pm(logger, v);
 
-            if (pm_levels[v][0] != -1) {
+            if (pm_levels[v].size() == 0 or pm_levels[v][0] != -1) {
                 if (owner(v) != player) {
                     logger << " => " << label_vertex(game.getStrategy(v));
                 }
@@ -756,7 +773,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
 
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
-        if (pm_levels[v][0] != -1) Solver::solve(v, 1-player, game.getStrategy(v));
+        if (pm_levels[v].size() == 0 or pm_levels[v][0] != -1) Solver::solve(v, 1-player, game.getStrategy(v));
     }
 
     Solver::flush();
@@ -786,7 +803,7 @@ STRPM_SIMDSolver::run()
         RatioCompare
         //ApproxSizeCompare
     > pq { };
-    pq.push({2, 1});
+    pq.push({1, 1});
     /*
     To use SizeCompare:
     std::priority_queue<
