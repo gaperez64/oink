@@ -24,6 +24,14 @@ namespace stdx = std::experimental;
 using simd_uint8 = stdx::fixed_size_simd<uint8_t, 8>;
 using simd_uint8_mask = stdx::fixed_size_simd_mask<uint8_t, 8>;
 
+// Bit-parallel popcount for all 8 uint8 lanes simultaneously.
+// Uses the standard Hamming-weight algorithm; no intrinsics required.
+inline simd_uint8 simd_popcount8(simd_uint8 x) noexcept {
+    x = x - ((x >> 1) & simd_uint8(0x55));
+    x = (x & simd_uint8(0x33)) + ((x >> 2) & simd_uint8(0x33));
+    return (x + (x >> 4)) & simd_uint8(0x0F);
+}
+
 namespace pg {
 
 class STRPM_SIMDSolver : public Solver
