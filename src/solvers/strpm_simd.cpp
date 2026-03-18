@@ -141,13 +141,19 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     if (tmp_levels[0] == -1) return; // already Top
 
     simd_uint8_mask has_bits = (tmp_masks > 0);
-    simd_uint8 nlb_counts { std::popcount(static_cast<uint8_t>(tmp_masks[0])) - has_bits[0] }; 
-    for (size_t n = 1; n < tmp_masks.size(); n++)
-    {
-        // Add the NLB in this to the previous result, subtract the leading bit if there is one
-        nlb_counts[n] = nlb_counts[n-1] + std::popcount(static_cast<uint8_t>(tmp_masks[n])) - has_bits[n];
+    // Compute per-string NLB contribution for all 8 strings simultaneously,
+    // then build the inclusive prefix sum (loop is now additions-only).
+    // per_elem[i] = popcount(masks[i]) - (masks[i] > 0)
+    simd_uint8 per_elem = simd_popcount8(tmp_masks);
+    stdx::where(has_bits, per_elem) = per_elem - simd_uint8(1);
+    simd_uint8 nlb_counts;
+    nlb_counts[0] = per_elem[0];
+    for (size_t n = 1; n < 8; n++) {
+        nlb_counts[n] = nlb_counts[n-1] + per_elem[n];
     }
-    
+    // nlb_before[i] = inclusive prefix sum up to i-1 = nlb_counts[i] - per_elem[i]
+    simd_uint8 nlb_before = nlb_counts - per_elem;
+
     std::vector<int>& lvls = tmp_levels;
     simd_uint8_mask smaller_than_p = simd_uint8 ([lvls, pindex](uint8_t i) { return i < lvls.size() ? lvls[i] <= pindex : 0; }) == 1;
     simd_uint8 clear_first_bit(~simd_uint8{0} & ~1);
@@ -155,7 +161,6 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     simd_uint8 all_filled_after ([lvls, h](uint8_t i) {
         return i < lvls.size() ? (h - lvls[i] - 1) == (lvls.size() - i) : 0;
     });
-    simd_uint8 nlb_before ([&nlb_counts](uint8_t i) { return i == 0 ? 0 : nlb_counts[i-1]; });
     simd_uint8_mask no_successor = has_bits and ((nlb_before == t) or ((nlb_counts == t) and (
              ((tmp_bits == pattern_zero_and_ones) and (all_filled_after == 1)) // Third case
           or (tmp_bits == tmp_masks))) // Fourth case
@@ -244,14 +249,13 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             tmp_levels.push_back(set_to_level);
             set_to_level++;
         }
-        simd_uint8 after_match ([match](uint8_t i) { 
-            return i > match; 
-        });
-        simd_uint8 before_levels ([lvls](uint8_t i) { 
-            return i < lvls.size(); 
-        });
-        stdx::where((before_levels > 0 and after_match > 0), tmp_masks) = 1;
-        stdx::where((after_match > 0), tmp_bits) = 0;
+        // lane_indices = [0,1,2,...,7]: compare directly to produce masks,
+        // avoiding intermediate simd_uint8 temporaries that are immediately thresholded.
+        static const simd_uint8 lane_indices{[](uint8_t i){ return i; }};
+        simd_uint8_mask after_match_mask   = lane_indices > simd_uint8(static_cast<uint8_t>(match));
+        simd_uint8_mask before_levels_mask = lane_indices < simd_uint8(static_cast<uint8_t>(lvls.size()));
+        stdx::where(before_levels_mask and after_match_mask, tmp_masks) = 1;
+        stdx::where(after_match_mask, tmp_bits) = 0;
     }
 }
 
@@ -337,18 +341,22 @@ STRPM_SIMDSolver::compare(int pindex)
     if (best_levels[0] == -1) return -1;
 
     simd_uint8 shorter_string = tmp_masks & best_masks;
-    simd_uint8 first_length_difference = (tmp_masks ^ best_masks) & ~((tmp_masks ^ best_masks) * 2);
+    // Factor out the XOR and use << 1 instead of * 2 (same for uint8, clearer intent).
+    simd_uint8 diff = tmp_masks ^ best_masks;
+    simd_uint8 first_length_difference = diff & ~(diff << 1);
     simd_uint8 bit_xor = tmp_bits ^ best_bits;
-    simd_uint8_mask a_less = ((tmp_masks < best_masks) and (bit_xor & (shorter_string + first_length_difference)) == first_length_difference) or
-                             ((tmp_masks > best_masks) and (bit_xor & (shorter_string + first_length_difference)) == 0);
-    simd_uint8_mask b_less = ((best_masks < tmp_masks) and (bit_xor & (shorter_string + first_length_difference)) == first_length_difference) or
-                             ((best_masks > tmp_masks) and (bit_xor & (shorter_string + first_length_difference)) == 0);
-
+    // Hoist the repeated sub-expressions: each appeared 4× in the original.
+    simd_uint8 combined     = shorter_string + first_length_difference;
+    simd_uint8 relevant_xor = bit_xor & combined;
+    simd_uint8_mask a_less = ((tmp_masks < best_masks) and (relevant_xor == first_length_difference)) or
+                             ((tmp_masks > best_masks) and (relevant_xor == 0));
+    simd_uint8_mask b_less = ((best_masks < tmp_masks) and (relevant_xor == first_length_difference)) or
+                             ((best_masks > tmp_masks) and (relevant_xor == 0));
 
     simd_uint8 different_bits = (shorter_string & bit_xor);
-    simd_uint8 first_bit_difference ([&different_bits](uint8_t i){ 
-        return 1u << (std::countr_zero(static_cast<uint8_t>(different_bits[i])));
-    });
+    // Isolate lowest set bit with the two's-complement trick x & (-x), applied
+    // to all 8 lanes at once instead of calling countr_zero per lane.
+    simd_uint8 first_bit_difference = different_bits & (simd_uint8(0) - different_bits);
     simd_uint8_mask a_greater = (different_bits > 0) and ((tmp_bits & first_bit_difference) > 0);
     simd_uint8_mask b_greater = (different_bits > 0) and ((best_bits & first_bit_difference) > 0);
 
