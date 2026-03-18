@@ -28,11 +28,16 @@ using simd_uint8_mask = stdx::fixed_size_simd_mask<uint8_t, 8>;
 // Top is represented by levels[0] == -1 (matching the scalar strpm solver).
 
 // Bit-parallel popcount for all 8 uint8 lanes simultaneously.
-// Uses the standard Hamming-weight algorithm; no intrinsics required.
+// Uses the standard Hamming-weight (sideways addition) algorithm:
+//   Step 1: Pair adjacent bits: count = b1+b0 for each 2-bit group
+//           x - ((x >> 1) & 0x55) works because for 2-bit value ab:
+//           ab - 0b = ab (i.e. a+b when both ≤1), handles carry correctly.
+//   Step 2: Sum adjacent pairs into 4-bit nibble counts via masking.
+//   Step 3: Sum adjacent nibbles; result fits in low nibble, mask off high.
 inline simd_uint8 simd_popcount8(simd_uint8 x) noexcept {
-    x = x - ((x >> 1) & simd_uint8(0x55));
-    x = (x & simd_uint8(0x33)) + ((x >> 2) & simd_uint8(0x33));
-    return (x + (x >> 4)) & simd_uint8(0x0F);
+    x = x - ((x >> 1) & simd_uint8(0x55));          // 2-bit sums
+    x = (x & simd_uint8(0x33)) + ((x >> 2) & simd_uint8(0x33)); // 4-bit sums
+    return (x + (x >> 4)) & simd_uint8(0x0F);        // 8-bit sum (0..8)
 }
 
 // Precomputed lane index vector [0,1,2,...,7].
