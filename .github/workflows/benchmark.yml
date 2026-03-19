@@ -73,11 +73,12 @@ jobs:
       run: |
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git config user.name "github-actions[bot]"
+        ORIG_HEAD=$(git rev-parse HEAD)
         git fetch origin gh-pages 2>/dev/null || (
           git switch --orphan gh-pages
           git commit --allow-empty -m "init gh-pages"
           git push origin gh-pages
-          git checkout -
+          git checkout "$ORIG_HEAD"
         )
 
     # Store results and check for regressions.
