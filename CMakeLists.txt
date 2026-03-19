@@ -7,6 +7,12 @@ project(oink
     LANGUAGES C CXX
 )
 
+# Check for <experimental/simd> (available in libstdc++ but not in Apple libc++)
+include(CheckIncludeFileCXX)
+set(CMAKE_REQUIRED_FLAGS "-std=c++20")
+check_include_file_cxx("experimental/simd" HAVE_EXPERIMENTAL_SIMD)
+unset(CMAKE_REQUIRED_FLAGS)
+
 # Dependencies
 include(FetchContent)
 if(NOT TARGET lace)
@@ -99,7 +105,6 @@ target_sources(oink
     src/solvers/tspm.cpp
     src/solvers/sspm.cpp
     src/solvers/strpm.cpp
-    src/solvers/strpm_simd.cpp
     src/solvers/qpt.cpp
     src/solvers/tl.cpp
     src/solvers/rtl.cpp
@@ -111,6 +116,11 @@ target_sources(oink
     src/solvers/pmtl.cpp
     ${OINK_HDRS}
 )
+
+if(HAVE_EXPERIMENTAL_SIMD)
+    target_sources(oink PRIVATE src/solvers/strpm_simd.cpp)
+    target_compile_definitions(oink PUBLIC OINK_HAVE_STRPM_SIMD)
+endif()
 
 set_target_properties(oink PROPERTIES PUBLIC_HEADER "${OINK_HDRS}")
 
@@ -253,9 +263,11 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
         add_test(NAME TestSolverZLKPP1 COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --zlkpp-std)
         add_test(NAME TestSolverZLKPP2 COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --zlkpp-waw)
         add_test(NAME TestSolverZLKPP3 COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --zlkpp-liv)
-        # test STRPM and SIMD variant
+        # test STRPM and SIMD variant (SIMD only when <experimental/simd> is available)
         add_test(NAME TestSolverSTRPM COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --strpm)
-        add_test(NAME TestSolverSTRPMSIMD COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --strpm-simd)
+        if(HAVE_EXPERIMENTAL_SIMD)
+            add_test(NAME TestSolverSTRPMSIMD COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --strpm-simd)
+        endif()
         #add_test(NAME TestSolver COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --)
     endif()
 endif()
