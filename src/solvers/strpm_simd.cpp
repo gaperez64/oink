@@ -469,23 +469,6 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
                 logger << std::endl;
             }
 #endif
-        if (k == 2) {
-            // k=2 fast path: scalar comparison avoids full SIMD compare
-            int cmp = compare_k2(tmp_bits[0], tmp_masks[0], tmp_levels[0], tmp_nlanes,
-                                 pm_bits[v*8], pm_masks[v*8], pm_levels[v*8], pm_nlanes[v], pindex);
-            if (cmp > 0) {
-                from_tmp(v);
-#ifndef NDEBUG
-                if (trace >= 1) {
-                    logger << "\033[32;1mnew measure\033[m of \033[36;1m" << label_vertex(v) << "\033[m:";
-                    stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
-                    logger << " (to " << label_vertex(target) << ")\n";
-                }
-#endif
-                return true;
-            }
-            return false;
-        }
         to_best(v);
         if (compare(pindex) > 0) {
             from_tmp(v);
@@ -504,7 +487,8 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
 
     // Pre-collect valid (non-disabled) successors to avoid branch
     // mispredictions from the disabled check inside the hot loop.
-    std::vector<int> succs;
+    // succs is a member vector, pre-reserved to nodecount() in run().
+    succs.clear();
     for (auto curedge = outs(v); *curedge != -1; curedge++) {
         int to = *curedge;
         if (!disabled[to]) succs.push_back(to);
@@ -514,172 +498,6 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
     const bool do_prog = (pl == (pr&1));
     const bool want_max = (owner(v) == pl);
 
-    // ============================================================
-    // k=2 fast path: two-phase lift with batched SIMD comparison.
-    //
-    // For k=2, each measure is a single (level, bitstring) pair.
-    //   Phase 1: progress all successors, storing compact results
-    //   Phase 2: find best/worst using SIMD-batched filtering
-    // ============================================================
-    if (k == 2) {
-        // Phase 1: progress each successor, store compact result.
-        // For k=2, only lane 0 matters.
-        std::vector<uint8_t> prog_bits(nsuccs);
-        std::vector<uint8_t> prog_masks(nsuccs);
-        std::vector<int> prog_levels(nsuccs);
-        std::vector<uint8_t> prog_nlanes_v(nsuccs);
-
-        bool found_top = false;
-        int top_idx = -1;
-        for (int si = 0; si < nsuccs; si++) {
-            to_tmp(succs[si]);
-#ifndef NDEBUG
-            if (trace >= 2) {
-                logger << "to successor " << label_vertex(succs[si]) << " from";
-                stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
-                logger << " =>";
-            }
-#endif
-            if (do_prog) prog_tmp(pindex, h);
-#ifndef NDEBUG
-            if (trace >= 2) {
-                stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
-                logger << std::endl;
-            }
-#endif
-            prog_bits[si] = tmp_bits[0];
-            prog_masks[si] = tmp_masks[0];
-            prog_levels[si] = tmp_levels[0];
-            prog_nlanes_v[si] = tmp_nlanes;
-
-            // Early exit on Top for want_max: Top is the maximum possible value.
-            if (want_max and tmp_nlanes > 0 and tmp_levels[0] == -1) {
-                found_top = true;
-                top_idx = si;
-                break;
-            }
-        }
-
-        // Phase 2: find best/worst among progressed results.
-        int best_si;
-        if (found_top) {
-            best_si = top_idx;
-        } else {
-            best_si = 0;
-            uint8_t best_b = prog_bits[0];
-            uint8_t best_m = prog_masks[0];
-            int best_l = prog_levels[0];
-            uint8_t best_nl = prog_nlanes_v[0];
-
-            // Process candidates in batches of 8 using SIMD filtering.
-            // Pack bits and masks into SIMD lanes to compare 8 candidates
-            // against the current best in one pass.
-            for (int batch_start = 1; batch_start < nsuccs; batch_start += 8) {
-                int batch_end = std::min(batch_start + 8, nsuccs);
-                int batch_size = batch_end - batch_start;
-
-                // Pack this batch's bits and masks into SIMD lanes
-                alignas(8) uint8_t b_arr[8] = {};
-                alignas(8) uint8_t m_arr[8] = {};
-                for (int j = 0; j < batch_size; j++) {
-                    b_arr[j] = prog_bits[batch_start + j];
-                    m_arr[j] = prog_masks[batch_start + j];
-                }
-                simd_uint8 cand_bits_v, cand_masks_v;
-                cand_bits_v.copy_from(b_arr, stdx::element_aligned);
-                cand_masks_v.copy_from(m_arr, stdx::element_aligned);
-
-                // Broadcast current best's bits and masks to all lanes
-                simd_uint8 best_bits_v(best_b);
-                simd_uint8 best_masks_v(best_m);
-
-                // SIMD bitstring comparison for all 8 candidates at once.
-                // Same algorithm as compare(), operating on packed uint8 values.
-                simd_uint8 shorter = cand_masks_v & best_masks_v;
-                simd_uint8 diff = cand_masks_v ^ best_masks_v;
-                simd_uint8 first_len_diff = diff & ~(diff << 1);
-                simd_uint8 bxor = cand_bits_v ^ best_bits_v;
-                simd_uint8 combined = shorter + first_len_diff;
-                simd_uint8 rel_xor = bxor & combined;
-
-                simd_uint8_mask a_less = ((cand_masks_v < best_masks_v) and (rel_xor == first_len_diff)) or
-                                         ((cand_masks_v > best_masks_v) and (rel_xor == simd_uint8(0)));
-                simd_uint8_mask b_less = ((best_masks_v < cand_masks_v) and (rel_xor == first_len_diff)) or
-                                         ((best_masks_v > cand_masks_v) and (rel_xor == simd_uint8(0)));
-
-                simd_uint8 diff_bits = shorter & bxor;
-                simd_uint8 first_bit_diff = diff_bits & (simd_uint8(0) - diff_bits);
-                simd_uint8_mask a_greater = (diff_bits > simd_uint8(0)) and ((cand_bits_v & first_bit_diff) > simd_uint8(0));
-                simd_uint8_mask b_greater = (diff_bits > simd_uint8(0)) and ((best_bits_v & first_bit_diff) > simd_uint8(0));
-
-                // Per-lane result: cand > best when a_greater or (!a_less and b_less)
-                simd_uint8_mask cand_wins = a_greater or (!a_less and b_less);
-                simd_uint8_mask best_wins = b_greater or (a_less and !b_less);
-
-                // Check each candidate in this batch. The SIMD result is valid
-                // for same-level candidates; for different levels, use scalar.
-                for (int j = 0; j < batch_size; j++) {
-                    int si = batch_start + j;
-                    int cmp;
-                    if (prog_levels[si] == best_l) {
-                        // Same level: use the SIMD-precomputed result
-                        if (cand_wins[j]) cmp = 1;
-                        else if (best_wins[j]) cmp = -1;
-                        else cmp = 0;
-                    } else {
-                        // Different level: scalar comparison
-                        cmp = compare_k2(prog_bits[si], prog_masks[si], prog_levels[si], prog_nlanes_v[si],
-                                         best_b, best_m, best_l, best_nl, pindex);
-                    }
-                    if (want_max ? (cmp > 0) : (cmp < 0)) {
-                        best_si = si;
-                        best_b = prog_bits[si];
-                        best_m = prog_masks[si];
-                        best_l = prog_levels[si];
-                        best_nl = prog_nlanes_v[si];
-                        // Note: SIMD results for remaining lanes in this batch
-                        // were computed against the OLD best. A candidate that
-                        // lost to old_best also loses to new_best (since
-                        // new_best > old_best). Candidates that beat old_best
-                        // are rechecked via the level != best_l scalar path.
-                    }
-                }
-            }
-        }
-
-        str = succs[best_si];
-
-        // Phase 3: compare winner against v's own measure.
-        // If the best successor's progressed measure is higher than v's
-        // current measure, update v (lift).
-        int cmp = compare_k2(pm_bits[v*8], pm_masks[v*8], pm_levels[v*8], pm_nlanes[v],
-                             prog_bits[best_si], prog_masks[best_si],
-                             prog_levels[best_si], prog_nlanes_v[best_si],
-                             pindex);
-        if (cmp < 0) {
-            // Update v's PM to the best successor's progressed measure.
-            // For k=2, only lane 0 is active; zero out the rest.
-            pm_bits[v*8] = prog_bits[best_si];
-            pm_masks[v*8] = prog_masks[best_si];
-            pm_levels[v*8] = prog_levels[best_si];
-            pm_nlanes[v] = prog_nlanes_v[best_si];
-            std::memset(&pm_bits[v*8 + 1], 0, 7);
-            std::memset(&pm_masks[v*8 + 1], 0, 7);
-#ifndef NDEBUG
-            if (trace >= 1) {
-                logger << "\033[1;32mnew measure\033[m of \033[36;1m" << label_vertex(v) << "\033[m:";
-                stream_pm(logger, v);
-                logger << " (to " << label_vertex(str) << ")\n";
-            }
-#endif
-            return true;
-        }
-        return false;
-    }
-
-    // ============================================================
-    // General path (k > 2): original compare using full SIMD
-    // ============================================================
     bool first = true;
     for (int si = 0; si < nsuccs; si++) {
         int to = succs[si];
@@ -1046,6 +864,7 @@ STRPM_SIMDSolver::run()
     // create datastructures
     Q.resize(nodecount());
     dirty.resize(nodecount());
+    succs.reserve(nodecount());
 
     // Create a priority queue for (k, t) pairs and push init with (1, 1)
     std::priority_queue<
