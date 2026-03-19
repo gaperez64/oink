@@ -135,8 +135,69 @@ protected:
     // Render SIMD to given ostream
     void stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& masks, int* levels, uint8_t nlanes);
 
-    // Compare tmp to best
+    // Compare tmp to best (general, works for all k)
     int compare(int pindex);
+
+    // Specialized comparison for k=2: each measure has exactly 1 bitstring,
+    // so comparison reduces to scalar operations on single uint8 values.
+    // Avoids constructing/comparing full 8-lane SIMD registers.
+    // Returns -1 (a < b), 0 (equal), 1 (a > b).
+    inline int compare_k2(
+        uint8_t a_bits, uint8_t a_masks, int a_level, uint8_t a_nlanes,
+        uint8_t b_bits, uint8_t b_masks, int b_level, uint8_t b_nlanes,
+        int pindex)
+    {
+        // Handle Top: represented by nlanes > 0 and level == -1
+        if (a_nlanes > 0 and a_level == -1 and b_nlanes > 0 and b_level == -1) return 0;
+        if (a_nlanes > 0 and a_level == -1) return 1;
+        if (b_nlanes > 0 and b_level == -1) return -1;
+
+        // Handle empty vs non-empty
+        if (a_nlanes == 0 and b_nlanes == 0) return 0;
+        if (a_nlanes == 0) return (b_bits & 1) ? -1 : 1;
+        if (b_nlanes == 0) return (a_bits & 1) ? 1 : -1;
+
+        // Both non-empty, non-Top: compare (level, bitstring) pairs.
+        // A string beyond pindex is irrelevant (treated as absent).
+        bool a_relevant = (a_level <= pindex);
+        bool b_relevant = (b_level <= pindex);
+        if (!a_relevant and !b_relevant) return 0;
+
+        // One in range, other out: the one in range has a string, the other doesn't.
+        // Leading bit 1 (right subtree) → greater; leading bit 0 → lesser.
+        if (a_relevant and !b_relevant) return (a_bits & 1) ? 1 : -1;
+        if (!a_relevant and b_relevant) return (b_bits & 1) ? -1 : 1;
+
+        // Both in range: lower level goes first in lexicographic order.
+        if (a_level < b_level) return (a_bits & 1) ? 1 : -1;
+        if (a_level > b_level) return (b_bits & 1) ? -1 : 1;
+
+        // Same level: full bitstring comparison (masks may differ in length
+        // due to partial resets in Case A of prog_tmp).
+        // Same algorithm as the SIMD compare(), but on scalar uint8 values.
+        uint8_t shorter = a_masks & b_masks;
+        uint8_t diff = a_masks ^ b_masks;
+        uint8_t first_len_diff = diff & static_cast<uint8_t>(~(diff << 1));
+        uint8_t bxor = a_bits ^ b_bits;
+        uint8_t combined = shorter + first_len_diff;
+        uint8_t rel_xor = bxor & combined;
+
+        // Length-based ordering: shorter string with differing extension
+        bool a_less = (a_masks < b_masks and rel_xor == first_len_diff) or
+                      (a_masks > b_masks and rel_xor == 0);
+        bool b_less = (b_masks < a_masks and rel_xor == first_len_diff) or
+                      (b_masks > a_masks and rel_xor == 0);
+
+        // Bit-value ordering within shared prefix
+        uint8_t diff_bits = shorter & bxor;
+        uint8_t first_bit_diff = diff_bits & (0u - diff_bits); // isolate lowest set bit
+        bool a_greater = diff_bits > 0 and (a_bits & first_bit_diff) > 0;
+        bool b_greater = diff_bits > 0 and (b_bits & first_bit_diff) > 0;
+
+        if (a_greater or (!a_less and b_less)) return 1;
+        if (b_greater or (a_less and !b_less)) return -1;
+        return 0;
+    }
 
     void prog_tmp(int pindex, int h);
 
