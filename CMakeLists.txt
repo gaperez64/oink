@@ -12,6 +12,7 @@ project(oink
 # and not guaranteed to compile with other toolchains even when the header
 # is present.  Use a compile test rather than a header-only check.
 include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
 cmake_push_check_state()
 set(CMAKE_REQUIRED_FLAGS "-std=c++20")
 check_cxx_source_compiles("
