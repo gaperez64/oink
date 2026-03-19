@@ -1,0 +1,90 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  benchmark:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install packages
+      run: |
+        sudo apt update
+        sudo apt install -y cmake build-essential libboost-all-dev
+
+    - name: Build (Release)
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DOINK_BUILD_TOOLS=ON \
+          -DOINK_BUILD_TESTS=OFF \
+          -DOINK_BUILD_EXTRA_TOOLS=OFF
+        cmake --build build --target test_solvers -j$(nproc)
+
+    # Reproducible random-game benchmark (fixed seed → same games every run).
+    # Covers the four main solver families: fixpoint (fpi), tangle learning (tl),
+    # Zielonka recursive (zlk), and priority promotion (pp).
+    - name: Benchmark — random games
+      run: |
+        ./build/test_solvers \
+          --count 20 --size 5000 --seed 42 \
+          --fpi --tl --zlk --pp \
+          2>&1 | python3 .github/scripts/parse_benchmark.py "random" \
+          >> benchmark_results.json
+
+    # Hard-game benchmark on a small curated subset of the bundled benchmarks.
+    # Clique and elevator games stress PP/ZLK; Friedmann games stress FPI;
+    # CTL/MU-calculus games represent real-world model-checking workloads.
+    - name: Benchmark — hard games
+      run: |
+        ./build/test_solvers \
+          hard-benchmarks/pgsolver/cliquegame_50.pg \
+          hard-benchmarks/pgsolver/cliquegame_60.pg \
+          hard-benchmarks/pgsolver/cliquegame_70.pg \
+          hard-benchmarks/pgsolver/elevators_2.pg \
+          hard-benchmarks/pgsolver/elevators_3.pg \
+          hard-benchmarks/pgsolver/elevators_4.pg \
+          hard-benchmarks/pgsolver/friedmannsubexp_25.pg \
+          hard-benchmarks/pgsolver/friedmannsubexp_50.pg \
+          hard-benchmarks/mlsolver/ctlsudoku1.pg \
+          hard-benchmarks/mlsolver/musudoku1.pg \
+          --fpi --tl --zlk --pp \
+          2>&1 | python3 .github/scripts/parse_benchmark.py "hard" \
+          >> benchmark_results.json
+
+    - name: Finalize JSON
+      run: python3 .github/scripts/finalize_benchmark.py benchmark_results.json
+
+    # Store results and check for regressions.
+    # On pushes to master/main the results are committed to the gh-pages branch
+    # and become the new baseline.  On pull requests the action only compares
+    # against the stored baseline and posts a comment; nothing is stored.
+    - name: Store / compare benchmark results
+      uses: benchmark-action/github-action-benchmark@v1
+      with:
+        tool: customSmallerIsBetter
+        output-file-path: benchmark_results.json
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        # Push new baseline only on merges to the main branch
+        auto-push: ${{ github.event_name == 'push' }}
+        # Comment on PRs whenever a regression is detected
+        comment-on-alert: true
+        # Flag a run as a regression if it is more than 50 % slower than baseline
+        alert-threshold: '150%'
+        # Fail the workflow so regressions block merging
+        fail-on-alert: true
+        # Always add a benchmark summary to the workflow run page
+        summary-always: true
+        gh-pages-branch: gh-pages
+        benchmark-data-dir-path: dev/bench
