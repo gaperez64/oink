@@ -14,7 +14,7 @@ jobs:
         - RelWithDebInfo
         - Debug
         cc:
-        - { cc: gcc, v: 9, cxx: g++}
+        - { cc: gcc, v: 11, cxx: g++}
         - { cc: gcc, v: 14, cxx: g++}
         - { cc: clang, v: 15, cxx: clang++ }
         - { cc: clang, v: 18, cxx: clang++ }
