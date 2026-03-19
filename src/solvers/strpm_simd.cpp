@@ -873,7 +873,7 @@ STRPM_SIMDSolver::run()
         RatioCompare
         //ApproxSizeCompare
     > pq { };
-    pq.push({1, 1});
+    pq.push({2, 1});
     /*
     To use SizeCompare:
     std::priority_queue<
