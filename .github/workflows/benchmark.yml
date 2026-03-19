@@ -17,6 +17,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
 
     - name: Install packages
       run: |
@@ -65,7 +68,11 @@ jobs:
     # Ensure the gh-pages branch exists so github-action-benchmark can read
     # or write the baseline even on the very first run.
     - name: Initialise gh-pages branch if absent
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config user.name "github-actions[bot]"
         git fetch origin gh-pages 2>/dev/null || (
           git switch --orphan gh-pages
           git commit --allow-empty -m "init gh-pages"
