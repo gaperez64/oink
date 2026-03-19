@@ -7,11 +7,23 @@ project(oink
     LANGUAGES C CXX
 )
 
-# Check for <experimental/simd> (available in libstdc++ but not in Apple libc++)
-include(CheckIncludeFileCXX)
+# Check whether <experimental/simd> is fully usable: the solver also calls
+# stdx::find_last_set(), a GCC libstdc++ extension absent from Apple libc++
+# and not guaranteed to compile with other toolchains even when the header
+# is present.  Use a compile test rather than a header-only check.
+include(CheckCXXSourceCompiles)
+cmake_push_check_state()
 set(CMAKE_REQUIRED_FLAGS "-std=c++20")
-check_include_file_cxx("experimental/simd" HAVE_EXPERIMENTAL_SIMD)
-unset(CMAKE_REQUIRED_FLAGS)
+check_cxx_source_compiles("
+    #include <experimental/simd>
+    namespace stdx = std::experimental;
+    using mask_t = stdx::fixed_size_simd_mask<unsigned char, 8>;
+    int main() {
+        mask_t m{false};
+        return stdx::find_last_set(m);
+    }
+" HAVE_EXPERIMENTAL_SIMD)
+cmake_pop_check_state()
 
 # Dependencies
 include(FetchContent)
