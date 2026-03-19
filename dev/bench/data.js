@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773915815592,
+  "lastUpdate": 1773915823129,
   "repoUrl": "https://github.com/gaperez64/oink",
   "entries": {
     "Benchmark": [
@@ -43,6 +43,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "strpm-simd [hard]",
             "value": 27860,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gaperez64@gmail.com",
+            "name": "Guillermo A. Perez",
+            "username": "gaperez64"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6892cb0c6508d6c320516952fdb59ea887aa479a",
+          "message": "Merge branch 'vfluegel:master' into master",
+          "timestamp": "2026-03-19T11:21:42+01:00",
+          "tree_id": "e8546b845238d07811162445a62f7275da020c29",
+          "url": "https://github.com/gaperez64/oink/commit/6892cb0c6508d6c320516952fdb59ea887aa479a"
+        },
+        "date": 1773915822522,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "strpm [random]",
+            "value": 1151,
+            "unit": "ms"
+          },
+          {
+            "name": "strpm-simd [random]",
+            "value": 1330,
+            "unit": "ms"
+          },
+          {
+            "name": "strpm [hard]",
+            "value": 49,
+            "unit": "ms"
+          },
+          {
+            "name": "strpm-simd [hard]",
+            "value": 26855,
             "unit": "ms"
           }
         ]
