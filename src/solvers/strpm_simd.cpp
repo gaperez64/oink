@@ -497,29 +497,9 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
     const bool do_prog = (pl == (pr&1));
     const bool want_max = (owner(v) == pl);
 
-    // Prefetch first two successors' PM data
-    if (nsuccs > 0) {
-        __builtin_prefetch(&pm_bits[succs[0] * 8], 0, 1);
-        __builtin_prefetch(&pm_masks[succs[0] * 8], 0, 1);
-        __builtin_prefetch(&pm_levels[succs[0] * 8], 0, 1);
-    }
-    if (nsuccs > 1) {
-        __builtin_prefetch(&pm_bits[succs[1] * 8], 0, 1);
-        __builtin_prefetch(&pm_masks[succs[1] * 8], 0, 1);
-        __builtin_prefetch(&pm_levels[succs[1] * 8], 0, 1);
-    }
-
     bool first = true;
     for (int si = 0; si < nsuccs; si++) {
         int to = succs[si];
-
-        // Prefetch 2 successors ahead to hide memory latency
-        if (si + 2 < nsuccs) {
-            int next2 = succs[si + 2];
-            __builtin_prefetch(&pm_bits[next2 * 8], 0, 1);
-            __builtin_prefetch(&pm_masks[next2 * 8], 0, 1);
-            __builtin_prefetch(&pm_levels[next2 * 8], 0, 1);
-        }
 
         to_tmp(to);
 #ifndef NDEBUG
