@@ -33,19 +33,15 @@ jobs:
         cmake --build build --target test_solvers -j$(nproc)
 
     # Reproducible random-game benchmark (fixed seed → same games every run).
-    # Covers the four main solver families: fixpoint (fpi), tangle learning (tl),
-    # Zielonka recursive (zlk), and priority promotion (pp).
     - name: Benchmark — random games
       run: |
         ./build/test_solvers \
           --count 20 --size 5000 --seed 42 \
-          --fpi --tl --zlk --pp \
+          --strpm --strpm-simd \
           2>&1 | python3 .github/scripts/parse_benchmark.py "random" \
           >> benchmark_results.json
 
     # Hard-game benchmark on a small curated subset of the bundled benchmarks.
-    # Clique and elevator games stress PP/ZLK; Friedmann games stress FPI;
-    # CTL/MU-calculus games represent real-world model-checking workloads.
     - name: Benchmark — hard games
       run: |
         ./build/test_solvers \
@@ -59,7 +55,7 @@ jobs:
           hard-benchmarks/pgsolver/friedmannsubexp_50.pg \
           hard-benchmarks/mlsolver/ctlsudoku1.pg \
           hard-benchmarks/mlsolver/musudoku1.pg \
-          --fpi --tl --zlk --pp \
+          --strpm --strpm-simd \
           2>&1 | python3 .github/scripts/parse_benchmark.py "hard" \
           >> benchmark_results.json
 
