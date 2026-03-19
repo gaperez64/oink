@@ -62,6 +62,17 @@ jobs:
     - name: Finalize JSON
       run: python3 .github/scripts/finalize_benchmark.py benchmark_results.json
 
+    # Ensure the gh-pages branch exists so github-action-benchmark can read
+    # or write the baseline even on the very first run.
+    - name: Initialise gh-pages branch if absent
+      run: |
+        git fetch origin gh-pages 2>/dev/null || (
+          git switch --orphan gh-pages
+          git commit --allow-empty -m "init gh-pages"
+          git push origin gh-pages
+          git checkout -
+        )
+
     # Store results and check for regressions.
     # On pushes to master/main the results are committed to the gh-pages branch
     # and become the new baseline.  On pull requests the action only compares
