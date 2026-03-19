@@ -52,7 +52,7 @@ jobs:
         ctest -C ${{ matrix.build_type }} -VV --timeout 30
 
   macos-build:
-    name: 'OSX ${{matrix.cc.cc}}@${{matrix.cc.v || "clang"}} ${{matrix.build_type}}'
+    name: 'OSX ${{matrix.cc.cc}}@${{matrix.cc.v || ''clang''}} ${{matrix.build_type}}'
     runs-on: macos-latest
     strategy:
       fail-fast: false
