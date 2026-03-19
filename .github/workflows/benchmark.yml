@@ -31,9 +31,13 @@ jobs:
         cmake -B build \
           -DCMAKE_BUILD_TYPE=Release \
           -DOINK_BUILD_TOOLS=ON \
-          -DOINK_BUILD_TESTS=OFF \
+          -DOINK_BUILD_TESTS=ON \
           -DOINK_BUILD_EXTRA_TOOLS=OFF
         cmake --build build --target test_solvers -j$(nproc)
+
+    - name: Verify — run solver tests
+      working-directory: build
+      run: ctest -C Release -VV --timeout 60
 
     # Reproducible random-game benchmark (fixed seed → same games every run).
     - name: Benchmark — random games
