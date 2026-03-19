@@ -88,7 +88,16 @@ struct ApproxSizeCompare {
 void
 STRPM_SIMDSolver::prog_tmp(int pindex, int h)
 {
-    // k >= 2 always (pq starts at {2,1} and k only increases)
+    if (k == 1 and tmp_nlanes == 0)
+    {
+        // We can immediately handle k = 1, it's just one branch and top
+        tmp_levels[0] = -1;
+        tmp_nlanes = 1;
+        tmp_bits = 0;
+        tmp_masks = 0;
+        fill_inactive_tmp();
+        return;
+    }
 
     // Simple case 1: Top >_p Top
     if (tmp_levels[0] == -1) return; // already Top
@@ -328,7 +337,14 @@ STRPM_SIMDSolver::stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& m
 int
 STRPM_SIMDSolver::compare(int pindex)
 {
-    // k >= 2 always (pq starts at {2,1} and k only increases)
+    if (k == 1)
+    {
+        // It is either empty or Top, so comparing sizes is enough
+        if (tmp_nlanes == best_nlanes) return 0;
+        else if (tmp_nlanes > 0) return 1;
+        else if (best_nlanes > 0) return -1;
+
+    }
 
     // cases involving Top
     if (tmp_levels[0] == -1 and best_levels[0] == -1) return 0;
