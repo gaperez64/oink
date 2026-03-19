@@ -485,14 +485,14 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
         }
     }
 
-    // Phase 3: Pre-collect valid successors to avoid branch mispredictions
-    // from the disabled check inside the hot loop.
-    int succs[256];  // local buffer; outcount is bounded by game structure
-    int nsuccs = 0;
+    // Pre-collect valid (non-disabled) successors to avoid branch
+    // mispredictions from the disabled check inside the hot loop.
+    std::vector<int> succs;
     for (auto curedge = outs(v); *curedge != -1; curedge++) {
         int to = *curedge;
-        if (!disabled[to]) succs[nsuccs++] = to;
+        if (!disabled[to]) succs.push_back(to);
     }
+    int nsuccs = static_cast<int>(succs.size());
 
     const bool do_prog = (pl == (pr&1));
     const bool want_max = (owner(v) == pl);
