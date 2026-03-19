@@ -35,7 +35,9 @@
 #include "solvers/npp.hpp"
 #include "solvers/sspm.hpp"
 #include "solvers/strpm.hpp"
+#ifdef OINK_HAVE_STRPM_SIMD
 #include "solvers/strpm_simd.hpp"
+#endif
 #include "solvers/zlkpp.hpp"
 #include "solvers/zlkq.hpp"
 #include "solvers/ppq.hpp"
@@ -72,7 +74,9 @@ Solvers::Solvers()
     _add("mspm", "Maciej' modified small progress measures", 0, [] (Oink& oink, Game& game) { return std::make_unique<MSPMSolver>(oink, game); });
     _add("sspm", "succinct small progress measures", 0, [] (Oink& oink, Game& game) { return std::make_unique<SSPMSolver>(oink, game); });
     _add("strpm", "Strahler-tree small progress measures", 0, [] (Oink& oink, Game& game) { return std::make_unique<STRPMSolver>(oink, game); });
+#ifdef OINK_HAVE_STRPM_SIMD
     _add("strpm-simd", "Strahler-tree small progress measures (SIMD optimised)", 0, [] (Oink& oink, Game& game) { return std::make_unique<STRPM_SIMDSolver>(oink, game); });
+#endif
     _add("bsspm", "bounded succinct small progress measures", 0, [] (Oink& oink, Game& game) { return std::make_unique<BoundedSSPMSolver>(oink, game); });
     _add("qpt", "quasi-polynomial time progress measures", 0, [] (Oink& oink, Game& game) { return std::make_unique<QPTSolver>(oink, game); });
     _add("bqpt", "bounded quasi-polynomial time progress measures", 0, [] (Oink& oink, Game& game) { return std::make_unique<BoundedQPTSolver>(oink, game); });

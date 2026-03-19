@@ -1,7 +1,11 @@
 name: CI testing 
 
 on:
-  workflow_dispatch
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
 
 jobs:
   linux-build:
@@ -14,7 +18,7 @@ jobs:
         - RelWithDebInfo
         - Debug
         cc:
-        - { cc: gcc, v: 9, cxx: g++}
+        - { cc: gcc, v: 11, cxx: g++}
         - { cc: gcc, v: 14, cxx: g++}
         - { cc: clang, v: 15, cxx: clang++ }
         - { cc: clang, v: 18, cxx: clang++ }
@@ -23,14 +27,13 @@ jobs:
       cxx: ${{matrix.cc.cxx}}-${{matrix.cc.v}}
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: Install packages
       run: |
         sudo apt update
         sudo apt install cmake cmake-data build-essential libboost-all-dev
-        if [ "${{ matrix.cc.cc }}" == "gcc" ] ;
-        then
+        if [ "${{ matrix.cc.cc }}" == "gcc" ]; then
           sudo apt install ${{matrix.cc.cc}}-${{matrix.cc.v}} ${{matrix.cc.cxx}}-${{matrix.cc.v}}
         else
           sudo apt install ${{matrix.cc.cc}}-${{matrix.cc.v}}
@@ -49,7 +52,7 @@ jobs:
         ctest -C ${{ matrix.build_type }} -VV --timeout 30
 
   macos-build:
-    name: 'OSX ${{matrix.cc.cc}}@${{matrix.cc.v || matrix.cc.xcode}} ${{matrix.build_type}}'
+    name: 'OSX ${{matrix.cc.cc}}@${{matrix.cc.v || "clang"}} ${{matrix.build_type}}'
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -58,31 +61,25 @@ jobs:
         - RelWithDebInfo
         - Debug
         cc:
-        - { cc: gcc, v: 14, cxx: g++, xcode: latest }
-        - { cc: clang, cxx: clang++, xcode: 12.0 }
-        - { cc: clang, cxx: clang++, xcode: 15.0 }
-    env:
-      cc: ${{matrix.cc.cc}}-${{matrix.cc.v}}
-      cxx: ${{matrix.cc.cxx}}-${{matrix.cc.v}}
+        - { cc: gcc, v: 14, cxx: g++ }
+        - { cc: clang, cxx: clang++ }
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: Install packages
       run: |
         brew update
-        if ["${{matrix.cc.cc}}" == "gcc"];
-        then
-          brew install ${{matrix.cc.cc}}@${{matrix.cc.v}}
+        if [ "${{matrix.cc.cc}}" == "gcc" ]; then
+          brew install gcc@${{matrix.cc.v}}
         fi
         brew install boost
 
     - name: CMake Build
       run: |
-        if [ "${{ matrix.cc.cc }}" == "gcc" ] ;
-        then
-          export CC=/usr/bin/${{matrix.cc.cc}}
-          export CXX=/usr/bin/${{matrix.cc.cxx}}
+        if [ "${{ matrix.cc.cc }}" == "gcc" ]; then
+          export CC=gcc-${{matrix.cc.v}}
+          export CXX=g++-${{matrix.cc.v}}
         else
           export CC=${{matrix.cc.cc}}
           export CXX=${{matrix.cc.cxx}}
