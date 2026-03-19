@@ -19,18 +19,29 @@
 
 #include "oink/solver.hpp"
 #include <experimental/simd>
+#include <cstring>
 
 namespace stdx = std::experimental;
 using simd_uint8 = stdx::fixed_size_simd<uint8_t, 8>;
 using simd_uint8_mask = stdx::fixed_size_simd_mask<uint8_t, 8>;
 
+// Top is represented by levels[0] == -1 (matching the scalar strpm solver).
+
 // Bit-parallel popcount for all 8 uint8 lanes simultaneously.
-// Uses the standard Hamming-weight algorithm; no intrinsics required.
+// Uses the standard Hamming-weight (sideways addition) algorithm:
+//   Step 1: Pair adjacent bits: count = b1+b0 for each 2-bit group
+//           x - ((x >> 1) & 0x55) works because for 2-bit value ab:
+//           ab - 0b = ab (i.e. a+b when both ≤1), handles carry correctly.
+//   Step 2: Sum adjacent pairs into 4-bit nibble counts via masking.
+//   Step 3: Sum adjacent nibbles; result fits in low nibble, mask off high.
 inline simd_uint8 simd_popcount8(simd_uint8 x) noexcept {
-    x = x - ((x >> 1) & simd_uint8(0x55));
-    x = (x & simd_uint8(0x33)) + ((x >> 2) & simd_uint8(0x33));
-    return (x + (x >> 4)) & simd_uint8(0x0F);
+    x = x - ((x >> 1) & simd_uint8(0x55));          // 2-bit sums
+    x = (x & simd_uint8(0x33)) + ((x >> 2) & simd_uint8(0x33)); // 4-bit sums
+    return (x + (x >> 4)) & simd_uint8(0x0F);        // 8-bit sum (0..8)
 }
+
+// Precomputed lane index vector [0,1,2,...,7].
+static const simd_uint8 LANE_INDICES{[](uint8_t i){ return i; }};
 
 namespace pg {
 
@@ -50,17 +61,24 @@ protected:
      *      - h: height
      */
     int k, t, h;
-    std::vector<std::vector<uint8_t>> pm_bits;
-    std::vector<std::vector<uint8_t>> pm_masks;
-    std::vector<std::vector<int>> pm_levels;
+
+    // Flat arrays: pm_bits[node*8 + lane], pm_masks[node*8 + lane]
+    // This eliminates vector<vector> double-indirection for cache-friendly access.
+    std::vector<uint8_t> pm_bits;
+    std::vector<uint8_t> pm_masks;
+    // Levels are int (can exceed 255 for large games); flat array stride 8.
+    std::vector<int> pm_levels;
+    std::vector<uint8_t> pm_nlanes;    // number of active lanes per node
 
     simd_uint8 tmp_bits;
     simd_uint8 tmp_masks;
-    std::vector<int> tmp_levels;
+    int tmp_levels[8];
+    uint8_t tmp_nlanes;
 
     simd_uint8 best_bits;
     simd_uint8 best_masks;
-    std::vector<int> best_levels;
+    int best_levels[8];
+    uint8_t best_nlanes;
 
     uintqueue Q;
     bitset dirty;
@@ -69,21 +87,57 @@ protected:
 
     uint64_t *lift_counters;
 
+    // Reusable buffer for collecting valid successors in lift(),
+    // pre-reserved to nodecount() to avoid per-call heap allocation.
+    std::vector<int> succs;
+
     // Copy pm[idx] into tmp
-    void to_tmp(int idx);
+    inline void to_tmp(int idx) {
+        tmp_bits.copy_from(&pm_bits[idx*8], stdx::element_aligned);
+        tmp_masks.copy_from(&pm_masks[idx*8], stdx::element_aligned);
+        std::memcpy(tmp_levels, &pm_levels[idx*8], 8 * sizeof(int));
+        tmp_nlanes = pm_nlanes[idx];
+    }
     // Copy tmp into pm[idx]
-    void from_tmp(int idx);
+    inline void from_tmp(int idx) {
+        tmp_bits.copy_to(&pm_bits[idx*8], stdx::element_aligned);
+        tmp_masks.copy_to(&pm_masks[idx*8], stdx::element_aligned);
+        std::memcpy(&pm_levels[idx*8], tmp_levels, 8 * sizeof(int));
+        pm_nlanes[idx] = tmp_nlanes;
+    }
     // Copy pm[idx] into best
-    void to_best(int idx);
+    inline void to_best(int idx) {
+        best_bits.copy_from(&pm_bits[idx*8], stdx::element_aligned);
+        best_masks.copy_from(&pm_masks[idx*8], stdx::element_aligned);
+        std::memcpy(best_levels, &pm_levels[idx*8], 8 * sizeof(int));
+        best_nlanes = pm_nlanes[idx];
+    }
     // Copy best into pm[idx]
-    void from_best(int idx);
+    inline void from_best(int idx) {
+        best_bits.copy_to(&pm_bits[idx*8], stdx::element_aligned);
+        best_masks.copy_to(&pm_masks[idx*8], stdx::element_aligned);
+        std::memcpy(&pm_levels[idx*8], best_levels, 8 * sizeof(int));
+        pm_nlanes[idx] = best_nlanes;
+    }
     // Copy tmp into best
-    void tmp_to_best();
+    inline void tmp_to_best() {
+        best_bits = tmp_bits;
+        best_masks = tmp_masks;
+        std::memcpy(best_levels, tmp_levels, 8 * sizeof(int));
+        best_nlanes = tmp_nlanes;
+    }
+
+    // Zero out inactive lanes' bits and masks (levels are scalar, not touched)
+    inline void fill_inactive_tmp() {
+        simd_uint8_mask inactive = LANE_INDICES >= simd_uint8(tmp_nlanes);
+        stdx::where(inactive, tmp_bits) = simd_uint8(0);
+        stdx::where(inactive, tmp_masks) = simd_uint8(0);
+    }
 
     // Render pm[idx] to given ostream
     void stream_pm(std::ostream &out, int idx);
     // Render SIMD to given ostream
-    void stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& masks, std::vector<int>& levels);
+    void stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& masks, int* levels, uint8_t nlanes);
 
     // Compare tmp to best
     int compare(int pindex);
@@ -119,4 +173,4 @@ protected:
 
 }
 
-#endif 
+#endif
