@@ -164,7 +164,15 @@ SSPM_SIMDSolver::prog_tmp(int pindex, int h)
             tmp_bits[last_filled] |= (1u << (15 - last_zero));  // Change the 0 to a 1
             // Keep rest as is - Level stays the same, Mask stays
         }
-        else 
+        // 3b: Zero in non-bottom = change from ,..01* to ,..,0*
+        else if (last_zero == 15)
+        {
+            // The 0 is in the first position of the string = We remove the entire string!
+            // The 0* string can be written in the same place
+            tmp_bits[last_filled] = 0;
+            tmp_levels[last_filled] = tmp_levels[last_filled] + 1;
+        }
+        else
         {
             // Cut off the existing string at the 0
             tmp_masks[last_filled] = (1u << (15 - last_zero)) - 1;

@@ -56,11 +56,11 @@ protected:
      */
     int l, h;
 
-    // Flat arrays: pm_bits[node*8 + lane], pm_masks[node*8 + lane]
+    // Flat arrays: pm_bits[node*16 + lane], pm_masks[node*16 + lane]
     // This eliminates vector<vector> double-indirection for cache-friendly access.
     std::vector<uint16_t> pm_bits;
     std::vector<uint16_t> pm_masks;
-    // Levels are int (can exceed 255 for large games); flat array stride 8.
+    // Levels are int (can exceed 255 for large games); flat array stride 16.
     std::vector<int> pm_levels;
     std::vector<uint8_t> pm_nlanes;    // number of active lanes per node
 
@@ -83,37 +83,37 @@ protected:
 
     // Copy pm[idx] into tmp
     inline void to_tmp(int idx) {
-        tmp_bits.copy_from(&pm_bits[idx*8], stdx::element_aligned);
-        tmp_masks.copy_from(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(tmp_levels, &pm_levels[idx*8], 8 * sizeof(int));
+        tmp_bits.copy_from(&pm_bits[idx*16], stdx::element_aligned);
+        tmp_masks.copy_from(&pm_masks[idx*16], stdx::element_aligned);
+        std::memcpy(tmp_levels, &pm_levels[idx*16], 16 * sizeof(int));
         tmp_nlanes = pm_nlanes[idx];
     }
     // Copy tmp into pm[idx]
     inline void from_tmp(int idx) {
-        tmp_bits.copy_to(&pm_bits[idx*8], stdx::element_aligned);
-        tmp_masks.copy_to(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(&pm_levels[idx*8], tmp_levels, 8 * sizeof(int));
+        tmp_bits.copy_to(&pm_bits[idx*16], stdx::element_aligned);
+        tmp_masks.copy_to(&pm_masks[idx*16], stdx::element_aligned);
+        std::memcpy(&pm_levels[idx*16], tmp_levels, 16 * sizeof(int));
         pm_nlanes[idx] = tmp_nlanes;
     }
     // Copy pm[idx] into best
     inline void to_best(int idx) {
-        best_bits.copy_from(&pm_bits[idx*8], stdx::element_aligned);
-        best_masks.copy_from(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(best_levels, &pm_levels[idx*8], 8 * sizeof(int));
+        best_bits.copy_from(&pm_bits[idx*16], stdx::element_aligned);
+        best_masks.copy_from(&pm_masks[idx*16], stdx::element_aligned);
+        std::memcpy(best_levels, &pm_levels[idx*16], 16 * sizeof(int));
         best_nlanes = pm_nlanes[idx];
     }
     // Copy best into pm[idx]
     inline void from_best(int idx) {
-        best_bits.copy_to(&pm_bits[idx*8], stdx::element_aligned);
-        best_masks.copy_to(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(&pm_levels[idx*8], best_levels, 8 * sizeof(int));
+        best_bits.copy_to(&pm_bits[idx*16], stdx::element_aligned);
+        best_masks.copy_to(&pm_masks[idx*16], stdx::element_aligned);
+        std::memcpy(&pm_levels[idx*16], best_levels, 16 * sizeof(int));
         pm_nlanes[idx] = best_nlanes;
     }
     // Copy tmp into best
     inline void tmp_to_best() {
         best_bits = tmp_bits;
         best_masks = tmp_masks;
-        std::memcpy(best_levels, tmp_levels, 8 * sizeof(int));
+        std::memcpy(best_levels, tmp_levels, 16 * sizeof(int));
         best_nlanes = tmp_nlanes;
     }
 
@@ -133,7 +133,7 @@ protected:
     inline int get_lowest_stp(int pindex) {
         simd_uint16_mask has_bits = (tmp_masks > 0);
         // smaller than p: check the INT value of the levels against pindex
-        alignas(8) uint8_t stp_arr[8] = {};
+        alignas(16) uint16_t stp_arr[16] = {};
         for (int i = 0; i < tmp_nlanes; i++) {
             if (tmp_levels[i] <= pindex) stp_arr[i] = 1;
         }
