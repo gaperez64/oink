@@ -25,6 +25,10 @@ namespace stdx = std::experimental;
 using simd_uint8 = stdx::fixed_size_simd<uint8_t, 8>;
 using simd_uint8_mask = stdx::fixed_size_simd_mask<uint8_t, 8>;
 
+// 32-lane variants for AVX2 batch processing (B = 32/(k-1) PMs per register).
+using simd_uint8_32      = stdx::fixed_size_simd<uint8_t, 32>;
+using simd_uint8_32_mask = stdx::fixed_size_simd_mask<uint8_t, 32>;
+
 // Top is represented by levels[0] == -1 (matching the scalar strpm solver).
 
 // Bit-parallel popcount for all 8 uint8 lanes simultaneously.
@@ -38,6 +42,13 @@ inline simd_uint8 simd_popcount8(simd_uint8 x) noexcept {
     x = x - ((x >> 1) & simd_uint8(0x55));          // 2-bit sums
     x = (x & simd_uint8(0x33)) + ((x >> 2) & simd_uint8(0x33)); // 4-bit sums
     return (x + (x >> 4)) & simd_uint8(0x0F);        // 8-bit sum (0..8)
+}
+
+// Same Hamming-weight popcount for 32-lane uint8 SIMD (AVX2 width).
+inline simd_uint8_32 simd_popcount32(simd_uint8_32 x) noexcept {
+    x = x - ((x >> 1) & simd_uint8_32(0x55));
+    x = (x & simd_uint8_32(0x33)) + ((x >> 2) & simd_uint8_32(0x33));
+    return (x + (x >> 4)) & simd_uint8_32(0x0F);
 }
 
 // Precomputed lane index vector [0,1,2,...,7].
@@ -79,6 +90,16 @@ protected:
     simd_uint8 best_masks;
     int best_levels[8];
     uint8_t best_nlanes;
+
+    // --- Interleaved batch registers for AVX2-width successor processing ---
+    // B = floor(32/(k-1)) PMs packed into one 32-lane register.
+    // PM j occupies lanes j*(k-1) .. j*(k-1)+(k-2).
+    simd_uint8_32 batch_bits{0};
+    simd_uint8_32 batch_masks{0};
+    std::vector<int>     batch_levels;  // size batch_B*(k-1), indexed [j*(k-1)+i]
+    std::vector<uint8_t> batch_nlanes;  // size batch_B, active string count per PM
+    std::vector<int>     batch_ids;     // size batch_B, node index per PM slot
+    int batch_B = 0;                    // floor(32/max(k-1,1)), set in run()
 
     uintqueue Q;
     bitset dirty;
@@ -133,6 +154,15 @@ protected:
         stdx::where(inactive, tmp_bits) = simd_uint8(0);
         stdx::where(inactive, tmp_masks) = simd_uint8(0);
     }
+
+    // Load up to count successor PMs into the interleaved batch registers
+    void load_batch(const int* ids, int count);
+    // Compute prog for all batch_B PMs simultaneously (interleaved layout)
+    void batch_prog_tmp(int pindex, int h);
+    // Copy PM j from batch registers back into tmp_* working registers
+    void extract_batch_to_tmp(int j);
+    // Copy PM j from batch registers back into best_* working registers
+    void extract_batch_to_best(int j);
 
     // Render pm[idx] to given ostream
     void stream_pm(std::ostream &out, int idx);

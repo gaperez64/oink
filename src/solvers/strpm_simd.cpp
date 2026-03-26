@@ -83,6 +83,278 @@ struct ApproxSizeCompare {
 };
 
 /**
+ * Load up to `count` successor PMs (given by node indices ids[0..count-1])
+ * into the interleaved batch registers. PM j occupies lanes j*(k-1)+i for
+ * string position i. Slots j >= count are zeroed (sentinel: nlanes = 0).
+ */
+void
+STRPM_SIMDSolver::load_batch(const int* ids, int count)
+{
+    const int stride = std::max(k - 1, 1);
+    alignas(32) uint8_t b[32] = {}, m[32] = {};
+    for (int j = 0; j < batch_B; j++) {
+        if (j < count) {
+            int node = ids[j];
+            batch_ids[j]    = node;
+            batch_nlanes[j] = pm_nlanes[node];
+            for (int i = 0; i < stride; i++) {
+                int lane = j * stride + i;
+                b[lane]            = pm_bits  [node * 8 + i];
+                m[lane]            = pm_masks [node * 8 + i];
+                batch_levels[lane] = pm_levels[node * 8 + i];
+            }
+        } else {
+            batch_ids[j]    = -1;
+            batch_nlanes[j] = 0;
+            for (int i = 0; i < stride; i++)
+                batch_levels[j * stride + i] = 0;
+            // b[] and m[] already zero-initialised for these lanes
+        }
+    }
+    batch_bits .copy_from(b, stdx::element_aligned);
+    batch_masks.copy_from(m, stdx::element_aligned);
+}
+
+/**
+ * Copy PM j from the interleaved batch registers into the tmp_* working registers.
+ */
+void
+STRPM_SIMDSolver::extract_batch_to_tmp(int j)
+{
+    const int stride = std::max(k - 1, 1);
+    alignas(8) uint8_t b[8] = {}, m[8] = {};
+    for (int i = 0; i < k - 1; i++) {
+        int l  = j * stride + i;
+        b[i]   = static_cast<uint8_t>(batch_bits [l]);
+        m[i]   = static_cast<uint8_t>(batch_masks[l]);
+        tmp_levels[i] = batch_levels[l];
+    }
+    tmp_bits .copy_from(b, stdx::element_aligned);
+    tmp_masks.copy_from(m, stdx::element_aligned);
+    tmp_nlanes = batch_nlanes[j];
+    fill_inactive_tmp();
+}
+
+/**
+ * Copy PM j from the interleaved batch registers into the best_* working registers.
+ */
+void
+STRPM_SIMDSolver::extract_batch_to_best(int j)
+{
+    const int stride = std::max(k - 1, 1);
+    alignas(8) uint8_t b[8] = {}, m[8] = {};
+    for (int i = 0; i < k - 1; i++) {
+        int l  = j * stride + i;
+        b[i]   = static_cast<uint8_t>(batch_bits [l]);
+        m[i]   = static_cast<uint8_t>(batch_masks[l]);
+        best_levels[i] = batch_levels[l];
+    }
+    best_bits .copy_from(b, stdx::element_aligned);
+    best_masks.copy_from(m, stdx::element_aligned);
+    best_nlanes = batch_nlanes[j];
+}
+
+/**
+ * Compute prog for all batch_B PMs simultaneously using the interleaved layout.
+ * This is the batched analogue of prog_tmp: it sets each PM to the minimum
+ * value strictly greater than itself (under the progress order at pindex).
+ *
+ * Layout: batch_bits/batch_masks are simd_uint8_32 registers where
+ *   lane j*(k-1)+i = string position i of PM j.
+ * batch_nlanes[j] and batch_levels[j*(k-1)+i] store the per-PM scalar state.
+ *
+ * The SIMD payoff is in steps 4b–4e below, which compute the NLB popcount,
+ * stp/afa predicates, and has_successor mask for all B PMs in one 32-wide pass.
+ * The per-PM increment (Cases A/B) and tail fill are then O(k) scalar each.
+ */
+void
+STRPM_SIMDSolver::batch_prog_tmp(int pindex, int h)
+{
+    const int stride = std::max(k - 1, 1);
+
+    // --- Handle k = 1 separately (each PM is either empty or Top) ---
+    if (k == 1) {
+        for (int j = 0; j < batch_B; j++) {
+            if (batch_nlanes[j] == 0) {
+                batch_nlanes[j]    = 1;
+                batch_levels[j]    = -1;
+            }
+            // already Top: nothing to do
+        }
+        return;
+    }
+
+    // --- Skip PMs that are already Top ---
+    // (kept implicit: the has_succ mask will be 0 for all their lanes because
+    //  batch_masks for Top entries are 0, so has_bits = false => has_succ = false)
+
+    // --- 4b. NLB per element via 32-wide SIMD popcount ---
+    simd_uint8_32 per_elem = simd_popcount32(batch_masks);
+    where(batch_masks > simd_uint8_32(0), per_elem) -= simd_uint8_32(1);
+
+    // --- 4c. NLB prefix sum within each PM's stride (scalar, O(32) total) ---
+    alignas(32) uint8_t nlb_b_arr[32] = {}, nlb_c_arr[32] = {};
+    for (int j = 0; j < batch_B; j++) {
+        int running = 0;
+        for (int i = 0; i < k - 1; i++) {
+            int l = j * stride + i;
+            nlb_b_arr[l] = static_cast<uint8_t>(running);
+            running      += static_cast<int>(per_elem[l]);
+            nlb_c_arr[l] = static_cast<uint8_t>(running);
+        }
+    }
+
+    // --- 4d. Per-lane predicates stp / afa (scalar levels -> SIMD) ---
+    alignas(32) uint8_t stp_arr[32] = {}, afa_arr[32] = {};
+    for (int j = 0; j < batch_B; j++) {
+        for (int i = 0; i < static_cast<int>(batch_nlanes[j]); i++) {
+            int l = j * stride + i;
+            stp_arr[l] = (batch_levels[l] <= pindex) ? 1 : 0;
+            afa_arr[l] = ((h - 1 - batch_levels[l]) == (static_cast<int>(batch_nlanes[j]) - i)) ? 1 : 0;
+        }
+    }
+    simd_uint8_32 stp_v, afa_v, nlb_b_v, nlb_c_v;
+    stp_v .copy_from(stp_arr,  stdx::element_aligned);
+    afa_v .copy_from(afa_arr,  stdx::element_aligned);
+    nlb_b_v.copy_from(nlb_b_arr, stdx::element_aligned);
+    nlb_c_v.copy_from(nlb_c_arr, stdx::element_aligned);
+
+    // --- 4e. has_successor and no_successor masks (32-wide SIMD) ---
+    simd_uint8_32_mask has_bits       = (batch_masks > simd_uint8_32(0));
+    simd_uint8_32_mask smaller_than_p = has_bits & (stp_v > simd_uint8_32(0));
+    simd_uint8_32 clear_first_bit(0xFE);
+    simd_uint8_32 pattern_zero_and_ones = batch_masks & clear_first_bit;
+    simd_uint8_32_mask no_succ = has_bits & (
+        (nlb_b_v == simd_uint8_32(static_cast<uint8_t>(t))) |
+        ((nlb_c_v == simd_uint8_32(static_cast<uint8_t>(t))) & (
+            ((batch_bits == pattern_zero_and_ones) & (afa_v > simd_uint8_32(0))) |
+            (batch_bits == batch_masks)
+        ))
+    );
+    simd_uint8_32_mask has_succ = smaller_than_p & !no_succ;
+
+    // --- 4f. Per-PM match finding (scalar, O(32) total) ---
+    std::vector<int> match(batch_B, -1);
+    for (int j = 0; j < batch_B; j++) {
+        if (batch_nlanes[j] == 0) continue;
+        if (batch_levels[j * stride] == -1) continue; // already Top
+        for (int i = static_cast<int>(batch_nlanes[j]) - 1; i >= 0; i--) {
+            if (has_succ[j * stride + i]) { match[j] = i; break; }
+        }
+    }
+
+    // --- 4g/4h/4i. Per-PM increment, Cases A/B, tail fill ---
+    // Each PM j is processed independently using direct element access.
+    // This mirrors prog_tmp lines 163-269 but loops over batch_B PMs.
+    for (int j = 0; j < batch_B; j++) {
+        if (batch_nlanes[j] == 0) continue;
+        if (batch_levels[j * stride] == -1) continue; // already Top
+
+        int mi = match[j];  // index of rightmost incrementable string, or -1
+
+        if (mi == -1) {
+            // No lane can be incremented
+            if (batch_levels[j * stride] == 0) {
+                // Overflow to Top
+                batch_nlanes[j]        = 1;
+                batch_levels[j * stride] = -1;
+                // Clear all lanes for this PM
+                for (int i = 0; i < stride; i++) {
+                    batch_bits [j * stride + i] = 0;
+                    batch_masks[j * stride + i] = 0;
+                }
+                continue;
+            } else {
+                // Carry: reset first string to level-1, bits=1
+                batch_bits[j * stride] = 1;
+                mi = 0;
+                batch_levels[j * stride] = std::min(batch_levels[j * stride] - 1, pindex);
+            }
+        }
+
+        int l = j * stride + mi;  // absolute lane of the match position
+
+        if (nlb_c_arr[l] >= static_cast<uint8_t>(t)) {
+            // --- Case A: all t NLB slots consumed; carry/reset ---
+            uint8_t b_val = static_cast<uint8_t>(batch_bits [l]);
+            uint8_t m_val = static_cast<uint8_t>(batch_masks[l]);
+            int reset_bits  = std::countl_one(static_cast<uint8_t>(b_val | ~m_val)) + 1;
+            int current_bits = std::popcount(m_val);
+            uint8_t keep = (reset_bits < 8) ? static_cast<uint8_t>((1u << (8 - reset_bits)) - 1) : 0u;
+            batch_bits [l] = b_val  & keep;
+            batch_masks[l] = m_val  & keep;
+            // Update nlb_c_arr[l] for tail fill (used as nlb_counts[mi-1] proxy)
+            int new_pop = std::popcount(static_cast<uint8_t>(batch_masks[l]));
+            nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l] + new_pop - (new_pop > 0 ? 1 : 0));
+
+            if (reset_bits < 8) {
+                // Partial reset: advance match by 1
+                mi++;
+                l = j * stride + mi;
+                if (mi < k - 1) {
+                    batch_levels[l] = batch_levels[l - 1] + 1;
+                    batch_bits [l]  = 0;
+                }
+            } else {
+                // Full reset: keep lane mi, move to next available level
+                nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l]); // contributed nothing
+                int mi1 = mi + 1;
+                bool gap = (mi1 == static_cast<int>(batch_nlanes[j]) && batch_levels[l] < h - 2) ||
+                           (mi1 < static_cast<int>(batch_nlanes[j]) && batch_levels[l] + 1 < batch_levels[j * stride + mi1]);
+                if (gap)
+                    batch_levels[l] = (mi1 == static_cast<int>(batch_nlanes[j]))
+                                        ? batch_levels[l] + 1
+                                        : batch_levels[j * stride + mi1] - 1;
+                else
+                    batch_levels[l] = batch_levels[l] + 1;
+            }
+        } else {
+            // --- Case B: NLB slots available; grow or start a new string ---
+            int mi1 = mi + 1;
+            if (mi1 < static_cast<int>(batch_nlanes[j]) &&
+                batch_levels[l] + 1 < batch_levels[j * stride + mi1] &&
+                batch_levels[l] != pindex)
+            {
+                // Gap between mi and mi+1: start a new string there
+                mi++;
+                l = j * stride + mi;
+                batch_bits [l]  = 1;
+                batch_levels[l] = std::min(pindex, batch_levels[l] - 1);
+            } else {
+                // Extend: append the next bit position
+                int first_new = std::popcount(static_cast<uint8_t>(batch_masks[l]));
+                batch_bits[l]  |= static_cast<uint8_t>(1u << first_new);
+            }
+        }
+
+        // --- 4i. Tail fill from mi onward ---
+        if (mi < k - 1) {
+            int bits_before = (mi > 0) ? static_cast<int>(nlb_c_arr[j * stride + mi - 1]) : 0;
+            batch_masks[l] = static_cast<uint8_t>((1u << (t - bits_before + 1)) - 1);
+
+            // Extend nlanes to fill consecutive levels after mi
+            batch_nlanes[j] = static_cast<uint8_t>(mi + 1);
+            int set_to_level = batch_levels[l] + 1;
+            while (static_cast<int>(batch_nlanes[j]) < k - 1 && set_to_level <= h - 2) {
+                batch_levels[j * stride + batch_nlanes[j]] = set_to_level;
+                batch_nlanes[j]++;
+                set_to_level++;
+            }
+            // Set mask=1, bits=0 for positions mi+1 .. batch_nlanes[j]-1
+            for (int i = mi + 1; i < static_cast<int>(batch_nlanes[j]); i++) {
+                batch_masks[j * stride + i] = 1;
+                batch_bits [j * stride + i] = 0;
+            }
+            // Zero out positions beyond batch_nlanes[j] for this PM
+            for (int i = static_cast<int>(batch_nlanes[j]); i < k - 1; i++) {
+                batch_bits [j * stride + i] = 0;
+                batch_masks[j * stride + i] = 0;
+            }
+        }
+    }
+}
+
+/**
  * Set tmp := min { m | m >_p tmp }
  */
 void
@@ -499,48 +771,80 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
     const bool want_max = (owner(v) == pl);
 
     bool first = true;
-    for (int si = 0; si < nsuccs; si++) {
-        int to = succs[si];
 
-        to_tmp(to);
+    // Use the interleaved batch path when batch_B >= 2 (and we have successors).
+    // batch_prog_tmp computes prog for batch_B PMs simultaneously using AVX2-wide
+    // SIMD; we then extract each result and compare against the running best.
+    if (batch_B >= 2 && nsuccs > 0) {
+        const int stride = std::max(k - 1, 1);
+        for (int si = 0; si < nsuccs; si += batch_B) {
+            int cnt = std::min(batch_B, nsuccs - si);
+            load_batch(succs.data() + si, cnt);
+            if (do_prog) batch_prog_tmp(pindex, h);
+
+            for (int j = 0; j < cnt; j++) {
+                // Early exit for want_max: Top is unsurpassable
+                if (want_max && batch_nlanes[j] > 0 &&
+                        batch_levels[j * stride] == -1) {
+                    extract_batch_to_best(j);
+                    str = batch_ids[j];
+                    goto batch_done;
+                }
+                extract_batch_to_tmp(j);
 #ifndef NDEBUG
-        if (trace >= 2) {
-            logger << "to successor " << label_vertex(to) << " from";
-            stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
-            logger << " =>";
-        }
+                if (trace >= 2) {
+                    logger << "to successor " << label_vertex(batch_ids[j]) << " (batch) ";
+                    stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
+                    logger << std::endl;
+                }
 #endif
-        if (do_prog) prog_tmp(pindex, h);
+                if (first) {
+                    tmp_to_best();
+                    str = batch_ids[j];
+                    first = false;
+                    if (want_max && best_nlanes > 0 && best_levels[0] == -1)
+                        goto batch_done;
+                } else if (want_max) {
+                    if (compare(pindex) > 0) { tmp_to_best(); str = batch_ids[j]; }
+                } else {
+                    if (compare(pindex) < 0) { tmp_to_best(); str = batch_ids[j]; }
+                }
+            }
+        }
+        batch_done:;
+    } else {
+        // Scalar fallback: batch_B < 2 (k very large) or no successors
+        for (int si = 0; si < nsuccs; si++) {
+            int to = succs[si];
+            to_tmp(to);
 #ifndef NDEBUG
-        if (trace >= 2) {
-            stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
-            logger << std::endl;
-        }
+            if (trace >= 2) {
+                logger << "to successor " << label_vertex(to) << " from";
+                stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
+                logger << " =>";
+            }
 #endif
-        if (first) {
-            tmp_to_best();
-            str = to;
-            // Early exit: if first successor already at Top and we want max, done
-            if (want_max and best_nlanes > 0 and best_levels[0] == -1) break;
-        } else if (want_max) {
-            // Early exit: Top is unsurpassable for max
-            if (tmp_nlanes > 0 and tmp_levels[0] == -1) {
+            if (do_prog) prog_tmp(pindex, h);
+#ifndef NDEBUG
+            if (trace >= 2) {
+                stream_simd(logger, tmp_bits, tmp_masks, tmp_levels, tmp_nlanes);
+                logger << std::endl;
+            }
+#endif
+            if (first) {
                 tmp_to_best();
                 str = to;
-                break;
+                if (want_max and best_nlanes > 0 and best_levels[0] == -1) break;
+            } else if (want_max) {
+                if (tmp_nlanes > 0 and tmp_levels[0] == -1) {
+                    tmp_to_best(); str = to; break;
+                }
+                if (compare(pindex) > 0) { tmp_to_best(); str = to; }
+            } else {
+                if (compare(pindex) < 0) { tmp_to_best(); str = to; }
             }
-            if (compare(pindex) > 0) {
-                tmp_to_best();
-                str = to;
-            }
-        } else {
-            // we want the min!
-            if (compare(pindex) < 0) {
-                tmp_to_best();
-                str = to;
-            }
+            first = false;
         }
-        first = false;
     }
 
     // set best to pm if higher
@@ -730,6 +1034,17 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     t = t_val;
     h = depth + 1;  // FIXME: This is Guillermo's hack, the +1
     k = k_val;  // Maybe possible: std::min(t + 2, h);
+
+    // Initialize interleaved batch registers for successor processing.
+    // batch_B PMs are packed into one 32-lane register; PM j occupies
+    // lanes j*(k-1) .. j*(k-1)+(k-2).
+    {
+        int stride = std::max(k - 1, 1);
+        batch_B = 32 / stride;
+        batch_levels.assign(batch_B * stride, 0);
+        batch_nlanes.assign(batch_B, 0);
+        batch_ids   .assign(batch_B, -1);
+    }
 
 #ifndef NDEBUG
     logger << "Strahler-tree parameters for player " << player << ": k = " << k << ", t = " << t << ", h = " << h << std::endl;
