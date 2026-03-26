@@ -129,6 +129,11 @@ STRPM_SIMDSolver::extract_batch_to_tmp(int j)
         m[i]   = static_cast<uint8_t>(batch_masks[l]);
         tmp_levels[i] = batch_levels[l];
     }
+    // k == 1: the loop above runs 0 times (k-1=0) but levels[0] must still be
+    // propagated.  batch_prog_tmp sets batch_levels[j]=-1 for Top, and
+    // load_batch copies pm_levels[succ*8] into batch_levels[j], so when
+    // batch_nlanes[j]>0 the level is valid (e.g. -1 for Top).
+    if (k == 1 && batch_nlanes[j] > 0) tmp_levels[0] = batch_levels[j];
     tmp_bits .copy_from(b, stdx::element_aligned);
     tmp_masks.copy_from(m, stdx::element_aligned);
     tmp_nlanes = batch_nlanes[j];
@@ -149,6 +154,8 @@ STRPM_SIMDSolver::extract_batch_to_best(int j)
         m[i]   = static_cast<uint8_t>(batch_masks[l]);
         best_levels[i] = batch_levels[l];
     }
+    // k == 1: same issue as extract_batch_to_tmp — levels[0] must be copied.
+    if (k == 1 && batch_nlanes[j] > 0) best_levels[0] = batch_levels[j];
     best_bits .copy_from(b, stdx::element_aligned);
     best_masks.copy_from(m, stdx::element_aligned);
     best_nlanes = batch_nlanes[j];
@@ -253,94 +260,84 @@ STRPM_SIMDSolver::batch_prog_tmp(int pindex, int h)
         int mi = match[j];  // index of rightmost incrementable string, or -1
 
         if (mi == -1) {
-            // No lane can be incremented
-            if (batch_levels[j * stride] == 0) {
+            // No string can be incremented: carry to a lower level or overflow to Top.
+            // Mirrors scalar: set_index = min(first_level, pindex+1) - 1
+            int new_level = std::min(batch_levels[j * stride], pindex + 1) - 1;
+            if (new_level < 0) {
                 // Overflow to Top
-                batch_nlanes[j]        = 1;
+                batch_nlanes[j]          = 1;
                 batch_levels[j * stride] = -1;
-                // Clear all lanes for this PM
                 for (int i = 0; i < stride; i++) {
                     batch_bits [j * stride + i] = 0;
                     batch_masks[j * stride + i] = 0;
                 }
                 continue;
-            } else {
-                // Carry: reset first string, formula must match scalar: min(L-2, pindex-1)
-                int new_level = std::min(batch_levels[j * stride] - 2, pindex - 1);
-                if (new_level < 0)
-                {
-                    // Overflow to Top
-                    batch_nlanes[j]          = 1;
-                    batch_levels[j * stride] = -1;
-                    for (int i = 0; i < stride; i++) {
-                        batch_bits [j * stride + i] = 0;
-                        batch_masks[j * stride + i] = 0;
-                    }
-                    continue;
-                }
-                batch_bits[j * stride] = 1;
-                mi = 0;
-                batch_levels[j * stride] = new_level;
             }
-        }
-
-        int l = j * stride + mi;  // absolute lane of the match position
-
-        if (nlb_c_arr[l] >= static_cast<uint8_t>(t)) {
-            // --- Case A: all t NLB slots consumed; carry/reset ---
-            uint8_t b_val = static_cast<uint8_t>(batch_bits [l]);
-            uint8_t m_val = static_cast<uint8_t>(batch_masks[l]);
-            int reset_bits  = std::countl_one(static_cast<uint8_t>(b_val | ~m_val)) + 1;
-            int current_bits = std::popcount(m_val);
-            uint8_t keep = (reset_bits < 8) ? static_cast<uint8_t>((1u << (8 - reset_bits)) - 1) : 0u;
-            batch_bits [l] = b_val  & keep;
-            batch_masks[l] = m_val  & keep;
-            // Update nlb_c_arr[l] for tail fill (used as nlb_counts[mi-1] proxy)
-            int new_pop = std::popcount(static_cast<uint8_t>(batch_masks[l]));
-            nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l] + new_pop - (new_pop > 0 ? 1 : 0));
-
-            if (reset_bits < 8) {
-                // Partial reset: advance match by 1
-                mi++;
-                l = j * stride + mi;
-                if (mi < k - 1) {
-                    batch_levels[l] = batch_levels[l - 1] + 1;
-                    batch_bits [l]  = 0;
-                }
-            } else {
-                // Full reset: keep lane mi, move to next available level
-                nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l]); // contributed nothing
-                int mi1 = mi + 1;
-                bool gap = (mi1 == static_cast<int>(batch_nlanes[j]) && batch_levels[l] < h - 2) ||
-                           (mi1 < static_cast<int>(batch_nlanes[j]) && batch_levels[l] + 1 < batch_levels[j * stride + mi1]);
-                if (gap)
-                    batch_levels[l] = (mi1 == static_cast<int>(batch_nlanes[j]))
-                                        ? batch_levels[l] + 1
-                                        : batch_levels[j * stride + mi1] - 1;
-                else
-                    batch_levels[l] = batch_levels[l] + 1;
-            }
+            // Carry: place a new leading "1" at new_level; tail fill handles the rest.
+            batch_bits[j * stride] = 1;
+            batch_levels[j * stride] = new_level;
+            mi = 0;
+            // Fall through directly to tail fill below (skip Case A/B).
         } else {
-            // --- Case B: NLB slots available; grow or start a new string ---
-            int mi1 = mi + 1;
-            if (mi1 < static_cast<int>(batch_nlanes[j]) &&
-                batch_levels[l] + 1 < batch_levels[j * stride + mi1] &&
-                batch_levels[l] != pindex)
-            {
-                // Gap between mi and mi+1: start a new string there
-                mi++;
-                l = j * stride + mi;
-                batch_bits [l]  = 1;
-                batch_levels[l] = std::min(pindex, batch_levels[l] - 1);
+            int l = j * stride + mi;  // absolute lane of the match position
+
+            if (nlb_c_arr[l] >= static_cast<uint8_t>(t)) {
+                // --- Case A: all t NLB slots consumed; carry/reset ---
+                uint8_t b_val = static_cast<uint8_t>(batch_bits [l]);
+                uint8_t m_val = static_cast<uint8_t>(batch_masks[l]);
+                int reset_bits  = std::countl_one(static_cast<uint8_t>(b_val | ~m_val)) + 1;
+                int current_bits = std::popcount(m_val);
+                uint8_t keep = (reset_bits < 8) ? static_cast<uint8_t>((1u << (8 - reset_bits)) - 1) : 0u;
+                batch_bits [l] = b_val  & keep;
+                batch_masks[l] = m_val  & keep;
+                // Update nlb_c_arr[l] for tail fill (used as nlb_counts[mi-1] proxy)
+                int new_pop = std::popcount(static_cast<uint8_t>(batch_masks[l]));
+                nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l] + new_pop - (new_pop > 0 ? 1 : 0));
+
+                if (reset_bits < 8) {
+                    // Partial reset: advance match by 1
+                    mi++;
+                    l = j * stride + mi;
+                    if (mi < k - 1) {
+                        batch_levels[l] = batch_levels[l - 1] + 1;
+                        batch_bits [l]  = 0;
+                    }
+                } else {
+                    // Full reset: keep lane mi, move to next available level
+                    nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l]); // contributed nothing
+                    int mi1 = mi + 1;
+                    bool gap = (mi1 == static_cast<int>(batch_nlanes[j]) && batch_levels[l] < h - 2) ||
+                               (mi1 < static_cast<int>(batch_nlanes[j]) && batch_levels[l] + 1 < batch_levels[j * stride + mi1]);
+                    if (gap)
+                        batch_levels[l] = (mi1 == static_cast<int>(batch_nlanes[j]))
+                                            ? batch_levels[l] + 1
+                                            : batch_levels[j * stride + mi1] - 1;
+                    else
+                        batch_levels[l] = batch_levels[l] + 1;
+                }
             } else {
-                // Extend: append the next bit position
-                int first_new = std::popcount(static_cast<uint8_t>(batch_masks[l]));
-                batch_bits[l]  |= static_cast<uint8_t>(1u << first_new);
+                // --- Case B: NLB slots available; grow or start a new string ---
+                int mi1 = mi + 1;
+                if (mi1 < static_cast<int>(batch_nlanes[j]) &&
+                    batch_levels[l] + 1 < batch_levels[j * stride + mi1] &&
+                    batch_levels[l] != pindex)
+                {
+                    // Gap between mi and mi+1: start a new string there
+                    mi++;
+                    l = j * stride + mi;
+                    batch_bits [l]  = 1;
+                    batch_levels[l] = std::min(pindex, batch_levels[l] - 1);
+                } else {
+                    // Extend: append the next bit position
+                    int first_new = std::popcount(static_cast<uint8_t>(batch_masks[l]));
+                    batch_bits[l]  |= static_cast<uint8_t>(1u << first_new);
+                }
             }
         }
 
         // --- 4i. Tail fill from mi onward ---
         if (mi < k - 1) {
+            int l = j * stride + mi;  // recompute l (mi may have changed above)
             int bits_before = (mi > 0) ? static_cast<int>(nlb_c_arr[j * stride + mi - 1]) : 0;
             batch_masks[l] = static_cast<uint8_t>((1u << (t - bits_before + 1)) - 1);
 
@@ -459,8 +456,8 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         {
             // Shift the first string to an earlier level and reset its bits to "1"
             // (the smallest non-empty bitstring with leading bit 1).
-            // Formula must match scalar: min(levels[0], pindex+1) - 2 = min(levels[0]-2, pindex-1)
-            int new_level = std::min(tmp_levels[0] - 2, pindex - 1);
+            // Mirrors scalar: set_index = min(levels[0], pindex+1) - 1
+            int new_level = std::min(tmp_levels[0], pindex + 1) - 1;
             if (new_level < 0)
             {
                 // Overflow to Top
