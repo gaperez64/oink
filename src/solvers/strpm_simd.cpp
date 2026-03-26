@@ -265,10 +265,22 @@ STRPM_SIMDSolver::batch_prog_tmp(int pindex, int h)
                 }
                 continue;
             } else {
-                // Carry: reset first string to level-1, bits=1
+                // Carry: reset first string, formula must match scalar: min(L-2, pindex-1)
+                int new_level = std::min(batch_levels[j * stride] - 2, pindex - 1);
+                if (new_level < 0)
+                {
+                    // Overflow to Top
+                    batch_nlanes[j]          = 1;
+                    batch_levels[j * stride] = -1;
+                    for (int i = 0; i < stride; i++) {
+                        batch_bits [j * stride + i] = 0;
+                        batch_masks[j * stride + i] = 0;
+                    }
+                    continue;
+                }
                 batch_bits[j * stride] = 1;
                 mi = 0;
-                batch_levels[j * stride] = std::min(batch_levels[j * stride] - 1, pindex);
+                batch_levels[j * stride] = new_level;
             }
         }
 
@@ -447,9 +459,19 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         {
             // Shift the first string to an earlier level and reset its bits to "1"
             // (the smallest non-empty bitstring with leading bit 1).
+            // Formula must match scalar: min(levels[0], pindex+1) - 2 = min(levels[0]-2, pindex-1)
+            int new_level = std::min(tmp_levels[0] - 2, pindex - 1);
+            if (new_level < 0)
+            {
+                // Overflow to Top
+                tmp_nlanes = 1;
+                tmp_levels[0] = -1;
+                fill_inactive_tmp();
+                return;
+            }
             tmp_bits[0] = 1;
             match = 0;
-            tmp_levels[0] = std::min(tmp_levels[0] - 1, pindex);
+            tmp_levels[0] = new_level;
         }
     }
     else if (nlb_counts[match] == t)
