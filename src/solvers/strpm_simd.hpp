@@ -202,8 +202,9 @@ protected:
 
     // Load up to count successor PMs into the interleaved batch registers
     void load_batch(const int* ids, int count);
-    // Compute prog for all batch_B PMs simultaneously (interleaved layout)
-    void batch_prog_tmp(int pindex, int h);
+    // Compute prog for all batch_B PMs simultaneously (interleaved layout).
+    // cnt = number of valid PMs loaded (≤ batch_B); loops are bounded by cnt.
+    void batch_prog_tmp(int pindex, int h, int cnt);
     // Copy PM j from batch registers back into tmp_* working registers
     void extract_batch_to_tmp(int j);
     // Copy PM j from batch registers back into best_* working registers

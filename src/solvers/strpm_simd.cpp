@@ -162,206 +162,280 @@ STRPM_SIMDSolver::extract_batch_to_best(int j)
 }
 
 /**
- * Compute prog for all batch_B PMs simultaneously using the interleaved layout.
- * This is the batched analogue of prog_tmp: it sets each PM to the minimum
- * value strictly greater than itself (under the progress order at pindex).
+ * Compute prog for cnt PMs simultaneously using the interleaved layout.
  *
- * Layout: batch_bits/batch_masks are simd_uint8_32 registers where
- *   lane j*(k-1)+i = string position i of PM j.
- * batch_nlanes[j] and batch_levels[j*(k-1)+i] store the per-PM scalar state.
+ * cnt = number of valid PMs currently loaded (≤ batch_B).  All scalar loops
+ * are bounded by cnt so that unused slots (j ≥ cnt) are never iterated.
  *
- * The SIMD payoff is in steps 4b–4e below, which compute the NLB popcount,
- * stp/afa predicates, and has_successor mask for all B PMs in one 32-wide pass.
- * The per-PM increment (Cases A/B) and tail fill are then O(k) scalar each.
+ * Predication/blending idiom: all bit/mask mutations are accumulated into
+ * working byte arrays wb[] / wm[] during the scalar per-PM loop; a single
+ * 32-wide SIMD copy_from at the end applies every update in one pass.
  */
 void
-STRPM_SIMDSolver::batch_prog_tmp(int pindex, int h)
+STRPM_SIMDSolver::batch_prog_tmp(int pindex, int h, int cnt)
 {
     const int stride = std::max(k - 1, 1);
 
-    // --- Handle k = 1 separately (each PM is either empty or Top) ---
+    // k = 1: each PM is either Bottom (nlanes=0 → Top) or already Top.
     if (k == 1) {
-        for (int j = 0; j < batch_B; j++) {
-            if (batch_nlanes[j] == 0) {
-                batch_nlanes[j]    = 1;
-                batch_levels[j]    = -1;
-            }
-            // already Top: nothing to do
+        for (int j = 0; j < cnt; j++) {
+            if (batch_nlanes[j] == 0) { batch_nlanes[j] = 1; batch_levels[j] = -1; }
         }
         return;
     }
 
-    // --- Skip PMs that are already Top ---
-    // (kept implicit: the has_succ mask will be 0 for all their lanes because
-    //  batch_masks for Top entries are 0, so has_bits = false => has_succ = false)
-
-    // --- 4b. NLB per element via 32-wide SIMD popcount ---
+    // ── 32-wide SIMD NLB per-element popcount ────────────────────────────────
     simd_uint8_32 per_elem = simd_popcount32(batch_masks);
     where(batch_masks > simd_uint8_32(0), per_elem) -= simd_uint8_32(1);
 
-    // --- 4c. NLB prefix sum within each PM's stride (scalar, O(32) total) ---
+    // =====================================================================
+    // k == 2 fast path: stride = 1, so lane j == PM j.
+    //
+    // Avoids the NLB prefix-sum and stp/afa copy_from overhead.
+    // One O(cnt) scalar pass handles all bit/level/nlanes updates;
+    // two predicated 32-wide SIMD writes apply all mask updates in bulk.
+    // =====================================================================
+    if (k == 2) {
+        // stp / afa (scalar, O(cnt), no inner loop)
+        alignas(32) uint8_t stp_arr[32] = {}, afa_arr[32] = {};
+        for (int j = 0; j < cnt; j++) {
+            if (batch_nlanes[j] == 0 || batch_levels[j] == -1) continue;
+            stp_arr[j] = (batch_levels[j] <= pindex) ? 1 : 0;
+            // k=2 → nlanes=1, i=0: afa iff (h-1-level) == (nlanes-i) == 1
+            afa_arr[j] = (batch_levels[j] == h - 2) ? 1 : 0;
+        }
+        simd_uint8_32 stp_v, afa_v;
+        stp_v.copy_from(stp_arr, stdx::element_aligned);
+        afa_v.copy_from(afa_arr, stdx::element_aligned);
+
+        // has_succ (32-wide SIMD)
+        // For k=2 nlb_b[j]=0, so (nlb_b==t) fires only if t==0 (invalid); omit.
+        simd_uint8_32_mask has_bits_m = (batch_masks > simd_uint8_32(0));
+        simd_uint8_32_mask smaller_p  = has_bits_m & (stp_v > simd_uint8_32(0));
+        simd_uint8_32      pat01      = batch_masks & simd_uint8_32(0xFE);
+        simd_uint8_32_mask no_succ    = has_bits_m
+            & (per_elem == simd_uint8_32(static_cast<uint8_t>(t)))
+            & (((batch_bits == pat01) & (afa_v > simd_uint8_32(0)))
+               | (batch_bits == batch_masks));
+        simd_uint8_32_mask has_succ = smaller_p & !no_succ;
+
+        // keep_arr / tail_arr: drive the two predicated mask updates below.
+        alignas(32) uint8_t keep_arr[32] = {};
+        alignas(32) uint8_t tail_arr[32] = {};
+
+        for (int j = 0; j < cnt; j++) {
+            if (batch_nlanes[j] == 0 || batch_levels[j] == -1) continue;
+            const uint8_t bv = static_cast<uint8_t>(batch_bits[j]);
+            const uint8_t mv = static_cast<uint8_t>(batch_masks[j]);
+
+            if (has_succ[j]) {
+                if (per_elem[j] >= static_cast<uint8_t>(t)) {
+                    // Case A: all t NLB slots used
+                    int rb = std::countl_one(static_cast<uint8_t>(bv | ~mv)) + 1;
+                    if (rb < 8) {
+                        // Partial: bits &= keep; mi → 1 == k-1, no tail fill
+                        const uint8_t keep = static_cast<uint8_t>((1u << (8 - rb)) - 1);
+                        batch_bits[j] = bv & keep;
+                        keep_arr[j]   = keep;   // masks &= keep via SIMD
+                    } else {
+                        // Full: clear bits, level++, tail fill sets mask
+                        batch_bits[j]   = 0;
+                        batch_levels[j] += 1;
+                        tail_arr[j] = 1;
+                    }
+                } else {
+                    // Case B: extend string by one bit position
+                    batch_bits[j] = bv | static_cast<uint8_t>(1u << std::popcount(mv));
+                    tail_arr[j] = 1;
+                }
+            } else {
+                // mi == -1: carry or overflow
+                int new_level = std::min(batch_levels[j], pindex + 1) - 1;
+                if (new_level < 0) {
+                    // Overflow to Top: write masks directly; no SIMD touch needed
+                    batch_bits[j]   = 0;
+                    batch_masks[j]  = 0;
+                    batch_nlanes[j] = 1;
+                    batch_levels[j] = -1;
+                } else {
+                    // Carry: leading "1" at new_level; tail fill sets mask
+                    batch_bits[j]   = 1;
+                    batch_levels[j] = new_level;
+                    tail_arr[j] = 1;
+                }
+            }
+        }
+
+        // Predicated mask updates (32-wide SIMD, two passes)
+        simd_uint8_32 keep_v; keep_v.copy_from(keep_arr, stdx::element_aligned);
+        // Case A partial: masks &= keep
+        stdx::where(keep_v > simd_uint8_32(0), batch_masks) &= keep_v;
+        // Case B + Case A full + carry: masks = (1u << (t+1)) - 1
+        simd_uint8_32 tail_v; tail_v.copy_from(tail_arr, stdx::element_aligned);
+        const uint8_t tmv = static_cast<uint8_t>((1u << (t + 1)) - 1);
+        stdx::where(tail_v > simd_uint8_32(0), batch_masks) = simd_uint8_32(tmv);
+        return;
+    }
+
+    // ── Scalar NLB prefix sum (O(cnt × stride)) ───────────────────────────────
     alignas(32) uint8_t nlb_b_arr[32] = {}, nlb_c_arr[32] = {};
-    for (int j = 0; j < batch_B; j++) {
-        int running = 0;
+    for (int j = 0; j < cnt; j++) {
+        int run = 0;
         for (int i = 0; i < k - 1; i++) {
             int l = j * stride + i;
-            nlb_b_arr[l] = static_cast<uint8_t>(running);
-            running      += static_cast<int>(per_elem[l]);
-            nlb_c_arr[l] = static_cast<uint8_t>(running);
+            nlb_b_arr[l] = static_cast<uint8_t>(run);
+            run          += static_cast<int>(per_elem[l]);
+            nlb_c_arr[l] = static_cast<uint8_t>(run);
         }
     }
 
-    // --- 4d. Per-lane predicates stp / afa (scalar levels -> SIMD) ---
+    // ── Scalar stp / afa predicates (O(cnt × stride)) ────────────────────────
     alignas(32) uint8_t stp_arr[32] = {}, afa_arr[32] = {};
-    for (int j = 0; j < batch_B; j++) {
+    for (int j = 0; j < cnt; j++) {
         for (int i = 0; i < static_cast<int>(batch_nlanes[j]); i++) {
-            int l = j * stride + i;
+            int l      = j * stride + i;
             stp_arr[l] = (batch_levels[l] <= pindex) ? 1 : 0;
             afa_arr[l] = ((h - 1 - batch_levels[l]) == (static_cast<int>(batch_nlanes[j]) - i)) ? 1 : 0;
         }
     }
     simd_uint8_32 stp_v, afa_v, nlb_b_v, nlb_c_v;
-    stp_v .copy_from(stp_arr,  stdx::element_aligned);
-    afa_v .copy_from(afa_arr,  stdx::element_aligned);
+    stp_v  .copy_from(stp_arr,   stdx::element_aligned);
+    afa_v  .copy_from(afa_arr,   stdx::element_aligned);
     nlb_b_v.copy_from(nlb_b_arr, stdx::element_aligned);
     nlb_c_v.copy_from(nlb_c_arr, stdx::element_aligned);
 
-    // --- 4e. has_successor and no_successor masks (32-wide SIMD) ---
-    simd_uint8_32_mask has_bits       = (batch_masks > simd_uint8_32(0));
-    simd_uint8_32_mask smaller_than_p = has_bits & (stp_v > simd_uint8_32(0));
-    simd_uint8_32 clear_first_bit(0xFE);
-    simd_uint8_32 pattern_zero_and_ones = batch_masks & clear_first_bit;
-    simd_uint8_32_mask no_succ = has_bits & (
+    // ── 32-wide SIMD has_succ mask ────────────────────────────────────────────
+    simd_uint8_32_mask has_bits_m = (batch_masks > simd_uint8_32(0));
+    simd_uint8_32_mask smaller_p  = has_bits_m & (stp_v > simd_uint8_32(0));
+    simd_uint8_32      pat01      = batch_masks & simd_uint8_32(0xFE);
+    simd_uint8_32_mask no_succ    = has_bits_m & (
         (nlb_b_v == simd_uint8_32(static_cast<uint8_t>(t))) |
         ((nlb_c_v == simd_uint8_32(static_cast<uint8_t>(t))) & (
-            ((batch_bits == pattern_zero_and_ones) & (afa_v > simd_uint8_32(0))) |
+            ((batch_bits == pat01) & (afa_v > simd_uint8_32(0))) |
             (batch_bits == batch_masks)
         ))
     );
-    simd_uint8_32_mask has_succ = smaller_than_p & !no_succ;
+    simd_uint8_32_mask has_succ = smaller_p & !no_succ;
 
-    // --- 4f. Per-PM match finding (scalar, O(32) total) ---
-    std::fill(batch_match.begin(), batch_match.end(), -1);
-    auto& match = batch_match;
-    for (int j = 0; j < batch_B; j++) {
+    // ── Working byte arrays: all bit/mask mutations go here ───────────────────
+    // Initialised from the current register state; a single copy_from at the
+    // end of the function writes every change back in one 32-wide SIMD store.
+    alignas(32) uint8_t wb[32], wm[32];
+    batch_bits .copy_to(wb, stdx::element_aligned);
+    batch_masks.copy_to(wm, stdx::element_aligned);
+
+    // ── Per-PM: match finding + Cases A / B + tail fill  (O(cnt × stride)) ───
+    std::fill(batch_match.begin(), batch_match.begin() + cnt, -1);
+
+    for (int j = 0; j < cnt; j++) {
         if (batch_nlanes[j] == 0) continue;
-        if (batch_levels[j * stride] == -1) continue; // already Top
-        for (int i = static_cast<int>(batch_nlanes[j]) - 1; i >= 0; i--) {
-            if (has_succ[j * stride + i]) { match[j] = i; break; }
-        }
-    }
+        if (batch_levels[j * stride] == -1) continue;  // already Top
 
-    // --- 4g/4h/4i. Per-PM increment, Cases A/B, tail fill ---
-    // Each PM j is processed independently using direct element access.
-    // This mirrors prog_tmp lines 163-269 but loops over batch_B PMs.
-    for (int j = 0; j < batch_B; j++) {
-        if (batch_nlanes[j] == 0) continue;
-        if (batch_levels[j * stride] == -1) continue; // already Top
-
-        int mi = match[j];  // index of rightmost incrementable string, or -1
+        // Rightmost has_succ lane within this PM's stride window
+        int mi = -1;
+        for (int i = static_cast<int>(batch_nlanes[j]) - 1; i >= 0; i--)
+            if (has_succ[j * stride + i]) { mi = i; break; }
 
         if (mi == -1) {
-            // No string can be incremented: carry to a lower level or overflow to Top.
-            // Mirrors scalar: set_index = min(first_level, pindex+1) - 1
+            // ── mi == -1: no lane can be incremented ─────────────────────────
             int new_level = std::min(batch_levels[j * stride], pindex + 1) - 1;
             if (new_level < 0) {
-                // Overflow to Top
+                // Overflow to Top: zero all lanes for this PM in wb / wm
                 batch_nlanes[j]          = 1;
                 batch_levels[j * stride] = -1;
-                for (int i = 0; i < stride; i++) {
-                    batch_bits [j * stride + i] = 0;
-                    batch_masks[j * stride + i] = 0;
-                }
+                for (int i = 0; i < stride; i++)
+                    wb[j * stride + i] = wm[j * stride + i] = 0;
                 continue;
             }
-            // Carry: place a new leading "1" at new_level; tail fill handles the rest.
-            batch_bits[j * stride] = 1;
+            // Carry: leading "1" at new_level; tail fill handles mask / nlanes
+            wb[j * stride]           = 1;
             batch_levels[j * stride] = new_level;
             mi = 0;
-            // Fall through directly to tail fill below (skip Case A/B).
+            // fall through to tail fill
+
         } else {
-            int l = j * stride + mi;  // absolute lane of the match position
+            int l = j * stride + mi;
 
             if (nlb_c_arr[l] >= static_cast<uint8_t>(t)) {
-                // --- Case A: all t NLB slots consumed; carry/reset ---
-                uint8_t b_val = static_cast<uint8_t>(batch_bits [l]);
-                uint8_t m_val = static_cast<uint8_t>(batch_masks[l]);
-                int reset_bits  = std::countl_one(static_cast<uint8_t>(b_val | ~m_val)) + 1;
-                int current_bits = std::popcount(m_val);
-                uint8_t keep = (reset_bits < 8) ? static_cast<uint8_t>((1u << (8 - reset_bits)) - 1) : 0u;
-                batch_bits [l] = b_val  & keep;
-                batch_masks[l] = m_val  & keep;
-                // Update nlb_c_arr[l] for tail fill (used as nlb_counts[mi-1] proxy)
-                int new_pop = std::popcount(static_cast<uint8_t>(batch_masks[l]));
-                nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l] + new_pop - (new_pop > 0 ? 1 : 0));
+                // ── Case A: all t NLB slots used; carry / reset ───────────────
+                uint8_t b_val = wb[l], m_val = wm[l];
+                int reset_bits = std::countl_one(static_cast<uint8_t>(b_val | ~m_val)) + 1;
+                uint8_t keep   = (reset_bits < 8)
+                                 ? static_cast<uint8_t>((1u << (8 - reset_bits)) - 1)
+                                 : 0u;
+                wb[l] = b_val & keep;
+                wm[l] = m_val & keep;
 
                 if (reset_bits < 8) {
-                    // Partial reset: advance match by 1
+                    // Partial reset: advance match, update NLB count for tail fill
+                    int new_pop    = std::popcount(wm[l]);
+                    nlb_c_arr[l]   = static_cast<uint8_t>(
+                                         nlb_b_arr[l] + (new_pop > 0 ? new_pop - 1 : 0));
                     mi++;
                     l = j * stride + mi;
                     if (mi < k - 1) {
                         batch_levels[l] = batch_levels[l - 1] + 1;
-                        batch_bits [l]  = 0;
+                        wb[l] = 0;
                     }
                 } else {
-                    // Full reset: keep lane mi, move to next available level
-                    nlb_c_arr[l] = static_cast<uint8_t>(nlb_b_arr[l]); // contributed nothing
-                    int mi1 = mi + 1;
+                    // Full reset: lane stays at mi, move to next available level
+                    nlb_c_arr[l] = nlb_b_arr[l];  // lane contributed nothing
+                    int mi1  = mi + 1;
                     bool gap = (mi1 == static_cast<int>(batch_nlanes[j]) && batch_levels[l] < h - 2) ||
-                               (mi1 < static_cast<int>(batch_nlanes[j]) && batch_levels[l] + 1 < batch_levels[j * stride + mi1]);
-                    if (gap)
-                        batch_levels[l] = (mi1 == static_cast<int>(batch_nlanes[j]))
-                                            ? batch_levels[l] + 1
-                                            : batch_levels[j * stride + mi1] - 1;
-                    else
-                        batch_levels[l] = batch_levels[l] + 1;
+                               (mi1 <  static_cast<int>(batch_nlanes[j]) &&
+                                batch_levels[l] + 1 < batch_levels[j * stride + mi1]);
+                    batch_levels[l] = gap
+                        ? ((mi1 == static_cast<int>(batch_nlanes[j]))
+                               ? batch_levels[l] + 1
+                               : batch_levels[j * stride + mi1] - 1)
+                        : batch_levels[l] + 1;
                 }
             } else {
-                // --- Case B: NLB slots available; grow or start a new string ---
+                // ── Case B: NLB available; extend or start a new string ───────
                 int mi1 = mi + 1;
                 if (mi1 < static_cast<int>(batch_nlanes[j]) &&
                     batch_levels[l] + 1 < batch_levels[j * stride + mi1] &&
                     batch_levels[l] != pindex)
                 {
-                    // Gap between mi and mi+1: start a new string there
+                    // Gap: start a new string at the next level
                     mi++;
-                    l = j * stride + mi;
-                    batch_bits [l]  = 1;
+                    l               = j * stride + mi;
+                    wb[l]           = 1;
                     batch_levels[l] = std::min(pindex, batch_levels[l] - 1);
                 } else {
-                    // Extend: append the next bit position
-                    int first_new = std::popcount(static_cast<uint8_t>(batch_masks[l]));
-                    batch_bits[l]  |= static_cast<uint8_t>(1u << first_new);
+                    // Extend: set the next unused bit position
+                    int first_new = std::popcount(wm[l]);
+                    wb[l] |= static_cast<uint8_t>(1u << first_new);
                 }
             }
         }
 
-        // --- 4i. Tail fill from mi onward ---
+        // ── Tail fill from mi onward ──────────────────────────────────────────
         if (mi < k - 1) {
-            int l = j * stride + mi;  // recompute l (mi may have changed above)
+            int l           = j * stride + mi;
             int bits_before = (mi > 0) ? static_cast<int>(nlb_c_arr[j * stride + mi - 1]) : 0;
-            batch_masks[l] = static_cast<uint8_t>((1u << (t - bits_before + 1)) - 1);
+            wm[l]           = static_cast<uint8_t>((1u << (t - bits_before + 1)) - 1);
 
             // Extend nlanes to fill consecutive levels after mi
             batch_nlanes[j] = static_cast<uint8_t>(mi + 1);
-            int set_to_level = batch_levels[l] + 1;
-            while (static_cast<int>(batch_nlanes[j]) < k - 1 && set_to_level <= h - 2) {
-                batch_levels[j * stride + batch_nlanes[j]] = set_to_level;
+            int stl         = batch_levels[l] + 1;
+            while (static_cast<int>(batch_nlanes[j]) < k - 1 && stl <= h - 2) {
+                batch_levels[j * stride + batch_nlanes[j]] = stl;
                 batch_nlanes[j]++;
-                set_to_level++;
+                stl++;
             }
-            // Set mask=1, bits=0 for positions mi+1 .. batch_nlanes[j]-1
-            for (int i = mi + 1; i < static_cast<int>(batch_nlanes[j]); i++) {
-                batch_masks[j * stride + i] = 1;
-                batch_bits [j * stride + i] = 0;
-            }
-            // Zero out positions beyond batch_nlanes[j] for this PM
-            for (int i = static_cast<int>(batch_nlanes[j]); i < k - 1; i++) {
-                batch_bits [j * stride + i] = 0;
-                batch_masks[j * stride + i] = 0;
-            }
+            // mask=1, bits=0 for positions (mi, nlanes)
+            for (int i = mi + 1; i < static_cast<int>(batch_nlanes[j]); i++)
+                { wm[j * stride + i] = 1; wb[j * stride + i] = 0; }
+            // Zero positions [nlanes, stride)
+            for (int i = static_cast<int>(batch_nlanes[j]); i < k - 1; i++)
+                { wb[j * stride + i] = 0; wm[j * stride + i] = 0; }
         }
     }
+
+    // ── Blend: apply all accumulated updates in one 32-wide SIMD store ───────
+    batch_bits .copy_from(wb, stdx::element_aligned);
+    batch_masks.copy_from(wm, stdx::element_aligned);
 }
 
 /**
@@ -800,7 +874,7 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
         for (int si = 0; si < nsuccs; si += batch_B) {
             int cnt = std::min(batch_B, nsuccs - si);
             load_batch(succs.data() + si, cnt);
-            if (do_prog) batch_prog_tmp(pindex, h);
+            if (do_prog) batch_prog_tmp(pindex, h, cnt);
 
             for (int j = 0; j < cnt; j++) {
                 // Early exit for want_max: Top is unsurpassable
