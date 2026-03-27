@@ -6,4 +6,4 @@ experimentaldebug/
 tests/dot/
 *.DS_Store
 keiren/
-extra/
+extra/build-release/
