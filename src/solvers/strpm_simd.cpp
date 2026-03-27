@@ -241,7 +241,8 @@ STRPM_SIMDSolver::batch_prog_tmp(int pindex, int h)
     simd_uint8_32_mask has_succ = smaller_than_p & !no_succ;
 
     // --- 4f. Per-PM match finding (scalar, O(32) total) ---
-    std::vector<int> match(batch_B, -1);
+    std::fill(batch_match.begin(), batch_match.end(), -1);
+    auto& match = batch_match;
     for (int j = 0; j < batch_B; j++) {
         if (batch_nlanes[j] == 0) continue;
         if (batch_levels[j * stride] == -1) continue; // already Top
@@ -809,6 +810,9 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
                     str = batch_ids[j];
                     goto batch_done;
                 }
+                // Fast first-string filter: skip extract+compare if j clearly
+                // cannot improve the running best.
+                if (!first && batch_can_skip(j, want_max, pindex)) continue;
                 extract_batch_to_tmp(j);
 #ifndef NDEBUG
                 if (trace >= 2) {
@@ -1063,6 +1067,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
         batch_levels.assign(batch_B * stride, 0);
         batch_nlanes.assign(batch_B, 0);
         batch_ids   .assign(batch_B, -1);
+        batch_match .assign(batch_B, -1);
     }
 
 #ifndef NDEBUG

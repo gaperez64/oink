@@ -99,6 +99,7 @@ protected:
     std::vector<int>     batch_levels;  // size batch_B*(k-1), indexed [j*(k-1)+i]
     std::vector<uint8_t> batch_nlanes;  // size batch_B, active string count per PM
     std::vector<int>     batch_ids;     // size batch_B, node index per PM slot
+    std::vector<int>     batch_match;   // size batch_B, reused across batch_prog_tmp calls
     int batch_B = 0;                    // floor(32/max(k-1,1)), set in run()
 
     uintqueue Q;
@@ -153,6 +154,50 @@ protected:
         simd_uint8_mask inactive = LANE_INDICES >= simd_uint8(tmp_nlanes);
         stdx::where(inactive, tmp_bits) = simd_uint8(0);
         stdx::where(inactive, tmp_masks) = simd_uint8(0);
+    }
+
+    // Fast first-string filter: returns true if batch PM j is definitely
+    // no better than the current running best, so we can skip extract+compare.
+    // Uses only batch_levels[j*stride], batch_bits[j*stride], and best_levels[0]/best_bits[0].
+    inline bool batch_can_skip(int j, bool want_max, int pindex) const {
+        const int stride = std::max(k - 1, 1);
+        // nlanes==0 means Bottom (minimum PM), only valid for k=1.
+        // For want_max, Bottom can't improve any non-empty best → skip.
+        // For want_min, Bottom is the minimum and can improve any non-Bottom best.
+        if (batch_nlanes[j] == 0) {
+            if (want_max) return (best_nlanes > 0);  // skip if best is non-empty
+            return (best_nlanes == 0);               // skip only if best also Bottom
+        }
+
+        const int tl = batch_levels[j * stride];
+        const int bl = best_levels[0];
+        const bool j_top = (tl == -1);
+        const bool b_top = (best_nlanes > 0 && bl == -1);
+
+        if (want_max) {
+            if (j_top) return false;   // j is Top → can't skip
+            if (b_top) return true;    // best already Top → j can't win
+        } else {
+            if (j_top && !b_top) return true;  // j is Top, want min → skip
+            if (!j_top && b_top) return false; // j non-Top, want min → extract
+            if (j_top && b_top) return false;  // both Top → need to compare for first=false
+        }
+
+        // Neither Top (or both Top handled above).
+        // First-string comparison using the same logic as compare() at lane i=0.
+        const uint8_t tb = static_cast<uint8_t>(batch_bits[j * stride]);
+        const uint8_t bb = static_cast<uint8_t>(best_bits[0]);
+
+        int cmp; // +1 = j > best, -1 = j < best, 0 = inconclusive
+        if ((tl <= pindex && bl > pindex) || tl < bl) {
+            cmp = (tb & 1) ? 1 : -1;
+        } else if ((tl > pindex && bl <= pindex) || tl > bl) {
+            cmp = (bb & 1) ? -1 : 1;
+        } else {
+            return false; // tied first string, need full compare
+        }
+
+        return want_max ? (cmp < 0) : (cmp > 0);
     }
 
     // Load up to count successor PMs into the interleaved batch registers
