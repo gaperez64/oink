@@ -22,8 +22,10 @@
 #include <cstring>
 
 namespace stdx = std::experimental;
-using simd_uint8 = stdx::fixed_size_simd<uint8_t, 8>;
+using simd_uint8      = stdx::fixed_size_simd<uint8_t, 8>;
 using simd_uint8_mask = stdx::fixed_size_simd_mask<uint8_t, 8>;
+using simd_int16      = stdx::fixed_size_simd<int16_t, 8>;
+using simd_int16_mask = stdx::fixed_size_simd_mask<int16_t, 8>;
 
 // Top is represented by levels[0] == -1 (matching the scalar strpm solver).
 
@@ -40,8 +42,9 @@ inline simd_uint8 simd_popcount8(simd_uint8 x) noexcept {
     return (x + (x >> 4)) & simd_uint8(0x0F);        // 8-bit sum (0..8)
 }
 
-// Precomputed lane index vector [0,1,2,...,7].
+// Precomputed lane index vectors [0,1,2,...,7] for uint8 and int16.
 static const simd_uint8 LANE_INDICES{[](uint8_t i){ return i; }};
+static const simd_int16 LANE_INDICES_I16{[](int16_t i){ return i; }};
 
 namespace pg {
 
@@ -64,20 +67,21 @@ protected:
 
     // Flat arrays: pm_bits[node*8 + lane], pm_masks[node*8 + lane]
     // This eliminates vector<vector> double-indirection for cache-friendly access.
-    std::vector<uint8_t> pm_bits;
-    std::vector<uint8_t> pm_masks;
-    // Levels are int (can exceed 255 for large games); flat array stride 8.
-    std::vector<int> pm_levels;
-    std::vector<uint8_t> pm_nlanes;    // number of active lanes per node
+    std::vector<uint8_t>  pm_bits;
+    std::vector<uint8_t>  pm_masks;
+    // Levels stored as int16_t (values in [0, h-2], sentinel -1 for Top).
+    // h is asserted < 32767 at startup so int16_t always suffices.
+    std::vector<int16_t>  pm_levels;
+    std::vector<uint8_t>  pm_nlanes;   // number of active lanes per node
 
     simd_uint8 tmp_bits;
     simd_uint8 tmp_masks;
-    int tmp_levels[8];
+    alignas(16) int16_t tmp_levels[8]; // alignas(16) for simd copy_from/copy_to
     uint8_t tmp_nlanes;
 
     simd_uint8 best_bits;
     simd_uint8 best_masks;
-    int best_levels[8];
+    alignas(16) int16_t best_levels[8];
     uint8_t best_nlanes;
 
     uintqueue Q;
@@ -95,35 +99,35 @@ protected:
     inline void to_tmp(int idx) {
         tmp_bits.copy_from(&pm_bits[idx*8], stdx::element_aligned);
         tmp_masks.copy_from(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(tmp_levels, &pm_levels[idx*8], 8 * sizeof(int));
+        std::memcpy(tmp_levels, &pm_levels[idx*8], 8 * sizeof(int16_t));
         tmp_nlanes = pm_nlanes[idx];
     }
     // Copy tmp into pm[idx]
     inline void from_tmp(int idx) {
         tmp_bits.copy_to(&pm_bits[idx*8], stdx::element_aligned);
         tmp_masks.copy_to(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(&pm_levels[idx*8], tmp_levels, 8 * sizeof(int));
+        std::memcpy(&pm_levels[idx*8], tmp_levels, 8 * sizeof(int16_t));
         pm_nlanes[idx] = tmp_nlanes;
     }
     // Copy pm[idx] into best
     inline void to_best(int idx) {
         best_bits.copy_from(&pm_bits[idx*8], stdx::element_aligned);
         best_masks.copy_from(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(best_levels, &pm_levels[idx*8], 8 * sizeof(int));
+        std::memcpy(best_levels, &pm_levels[idx*8], 8 * sizeof(int16_t));
         best_nlanes = pm_nlanes[idx];
     }
     // Copy best into pm[idx]
     inline void from_best(int idx) {
         best_bits.copy_to(&pm_bits[idx*8], stdx::element_aligned);
         best_masks.copy_to(&pm_masks[idx*8], stdx::element_aligned);
-        std::memcpy(&pm_levels[idx*8], best_levels, 8 * sizeof(int));
+        std::memcpy(&pm_levels[idx*8], best_levels, 8 * sizeof(int16_t));
         pm_nlanes[idx] = best_nlanes;
     }
     // Copy tmp into best
     inline void tmp_to_best() {
         best_bits = tmp_bits;
         best_masks = tmp_masks;
-        std::memcpy(best_levels, tmp_levels, 8 * sizeof(int));
+        std::memcpy(best_levels, tmp_levels, 8 * sizeof(int16_t));
         best_nlanes = tmp_nlanes;
     }
 
@@ -137,7 +141,7 @@ protected:
     // Render pm[idx] to given ostream
     void stream_pm(std::ostream &out, int idx);
     // Render SIMD to given ostream
-    void stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& masks, int* levels, uint8_t nlanes);
+    void stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& masks, int16_t* levels, uint8_t nlanes);
 
     // Compare tmp to best
     int compare(int pindex);
