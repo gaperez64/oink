@@ -306,20 +306,20 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
 void
 STRPM_SIMDSolver::stream_pm(std::ostream &out, int idx)
 {
-    uint8_t nlanes = pm_nlanes[idx];
-    if (nlanes > 0 and pm_levels[idx*8] == -1) {
+    uint8_t nlanes = pm[idx].nlanes;
+    if (nlanes > 0 and pm[idx].levels[0] == -1) {
         out << " \033[1;33mTop\033[m";
     } else {
         out << " { ";
         int output_level = 0;
         for (int i = 0; i < nlanes; i++) {
             if (i>0) out << ", ";
-            while (pm_levels[idx*8 + i] > output_level)
+            while (pm[idx].levels[i] > output_level)
             {
                 out << "ε, ";
                 output_level++;
             }
-            out << std::bitset<8>(pm_bits[idx*8 + i]) << "/" << std::bitset<8>(pm_masks[idx*8 + i]);
+            out << std::bitset<8>(pm[idx].bits[i]) << "/" << std::bitset<8>(pm[idx].masks[i]);
         }
         while (output_level < h-2)
         {
@@ -469,7 +469,7 @@ bool
 STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
 {
     // check if already Top
-    if (pm_nlanes[v] > 0 and pm_levels[v*8] == -1) return false; // already Top
+    if (pm[v].nlanes > 0 and pm[v].levels[0] == -1) return false; // already Top
 
     const int pr = priority(v);
     const int pindex = pl == 0 ? (h-1)-(pr+1)/2-1 : (h-1)-pr/2-1;
@@ -766,30 +766,21 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     logger << "Strahler-tree parameters for player " << player << ": k = " << k << ", t = " << t << ", h = " << h << std::endl;
 #endif
 
-    // Initialize progress measures using flat arrays.
+    // Initialize progress measures using AoS layout.
     // Every node is set to the smallest leaf in the tree.
     const int nc = nodecount();
-    pm_bits.assign(nc * 8, 0);
-    pm_masks.assign(nc * 8, 0);
-    pm_levels.assign(nc * 8, 0);
-    pm_nlanes.assign(nc, static_cast<uint8_t>(k - 1));
 
-    // Build the initial mask and levels pattern (once), then stamp it to every node.
-    alignas(8)  uint8_t  initial_mask[8]   = {};
-    alignas(16) int16_t  initial_levels[8] = {};
-
-    initial_mask[0] = (1 << (t+1)) - 1;
-    initial_levels[0] = 0;
+    // Build the initial NodePM pattern once, then fill the entire vector with it.
+    NodePM init{};
+    init.nlanes  = static_cast<uint8_t>(k - 1);
+    init.masks[0] = static_cast<uint8_t>((1 << (t+1)) - 1);
+    // init.levels[0] = 0 already (zero-initialised by NodePM{})
     for (int i = 1; i < k-1; i++)
     {
-        initial_levels[i] = static_cast<int16_t>(i);
-        initial_mask[i] = 1;
+        init.levels[i] = static_cast<int16_t>(i);
+        init.masks[i]  = 1;
     }
-    for (int n = 0; n < nc; n++)
-    {
-        std::memcpy(&pm_masks[n * 8], initial_mask, 8);
-        std::memcpy(&pm_levels[n * 8], initial_levels, 8 * sizeof(int16_t));
-    }
+    pm.assign(nc, init);
 
 #ifndef NDEBUG
     if (trace >= 1)
@@ -842,7 +833,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
 
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
-        if (pm_nlanes[v] == 0 or pm_levels[v*8] != -1) {
+        if (pm[v].nlanes == 0 or pm[v].levels[0] != -1) {
             if (owner(v) != player) {
                 // TODO: don't rely on the strategy array in the Game class
                 if (lift(v, -1, game.getStrategy()[v], player)) logger << "error: " << v << " is not progressive!" << std::endl;
@@ -857,7 +848,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
             logger << "\033[1m" << label_vertex(v) << (owner(v)?" (odd)":" (even)") << "\033[m:";
             stream_pm(logger, v);
 
-            if (pm_nlanes[v] == 0 or pm_levels[v*8] != -1) {
+            if (pm[v].nlanes == 0 or pm[v].levels[0] != -1) {
                 if (owner(v) != player) {
                     logger << " => " << label_vertex(game.getStrategy(v));
                 }
@@ -873,7 +864,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
 
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
-        if (pm_nlanes[v] == 0 or pm_levels[v*8] != -1) Solver::solve(v, 1-player, game.getStrategy(v));
+        if (pm[v].nlanes == 0 or pm[v].levels[0] != -1) Solver::solve(v, 1-player, game.getStrategy(v));
     }
 
     Solver::flush();
