@@ -92,7 +92,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     if (k == 1 and tmp_nlanes == 0)
     {
         // We can immediately handle k = 1, it's just one branch and top
-        tmp_levels[0] = int16_t(-1);
+        tmp_levels[0] = TOP_SENTINEL;
         tmp_nlanes = 1;
         tmp_bits = 0;
         tmp_masks = 0;
@@ -101,61 +101,127 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     }
 
     // Simple case 1: Top >_p Top
-    if (tmp_levels[0] == -1) return; // already Top
+    if (tmp_levels[0] == TOP_SENTINEL) return; // already Top
+
+    // --- k=2, t=1 specialization: fully scalar, no SIMD needed ---
+    // With k=2, there is at most 1 active lane.  With t=1, each bitstring
+    // has at most 2 bits (leading bit + 1 NLB).  The possible strings per
+    // lane are: mask=0x01/bits=0x01 ("1"), mask=0x03/bits=0x00 ("01"),
+    // mask=0x03/bits=0x02 ("10"), mask=0x03/bits=0x03 ("11").
+    // Case A always does a full reset (countl_one on a ≤2-bit string padded
+    // with ~mask always yields reset_bits ≥ 8), so the partial-reset path
+    // is dead code.
+    if (k == 2 and t == 1)
+    {
+        // Lane 0 is the only active lane.
+        uint16_t bits0 = tmp_bits[0], mask0 = tmp_masks[0];
+        uint16_t lev0  = tmp_levels[0];
+        int nlb = std::popcount(mask0) - 1; // 0 or 1
+
+        // Check if lane 0 has a valid successor.
+        bool stp = (lev0 <= static_cast<uint16_t>(pindex));
+        // "stuck" means no successor possible:
+        //   (a) bits == mask (all 1s, maximum value: "1" or "11"), or
+        //   (b) nlb==1 and bits==pattern_01^j and all_filled_after.
+        //       For k=2 (1 lane), all_filled_after iff lev0 == h-2.
+        bool stuck = (bits0 == mask0) or
+                     (nlb == 1 and bits0 == (mask0 & 0xFFFE) and lev0 == static_cast<uint16_t>(h - 2));
+
+        if (!stp or stuck)
+        {
+            // No successor in this lane.
+            if (lev0 == 0)
+            {
+                // Overflow to Top.
+                tmp_nlanes = 1;
+                tmp_levels[0] = TOP_SENTINEL;
+                fill_inactive_tmp();
+                return;
+            }
+            // Shift level down and reset bits to "1" (leading bit only).
+            tmp_bits[0] = 1;
+            tmp_masks[0] = 0x03; // t - 0 + 1 = 2 bits
+            tmp_levels[0] = static_cast<uint16_t>(std::min(static_cast<int>(lev0) - 1, pindex));
+            fill_inactive_tmp();
+            return;
+        }
+
+        if (nlb == 1)
+        {
+            // Case A (full reset): all t=1 NLB slots consumed.
+            // For k=2, t=1: countl_one on 2-bit string always gives reset_bits >= 8,
+            // so the entire string is erased.  Reset to leading-bit-only at next level.
+            if (lev0 + 1 <= static_cast<uint16_t>(h - 2))
+            {
+                tmp_bits[0] = 1;
+                tmp_masks[0] = 0x01; // just leading bit, then tail fill sets it to 0x03
+                tmp_levels[0] = static_cast<uint16_t>(lev0 + 1);
+            }
+            else
+            {
+                tmp_bits[0] = 1;
+                tmp_masks[0] = 0x01;
+                tmp_levels[0] = static_cast<uint16_t>(lev0 + 1);
+            }
+            // Tail fill: for k=2, match=0, k-2-match=0, so max_fill=0, no new lanes.
+            // Set mask to use t - 0 + 1 = 2 bits.
+            tmp_masks[0] = 0x03;
+        }
+        else
+        {
+            // Case B: extend the string by one bit.
+            int first_new = std::popcount(mask0);
+            tmp_bits[0] = bits0 | (1u << first_new);
+            // Tail fill: set mask to t+1=2 bits.
+            tmp_masks[0] = 0x03;
+        }
+        fill_inactive_tmp();
+        return;
+    }
 
     // --- NLB (Non-Leading-Bit) counting across all 8 bitstring lanes ---
     // Each bitstring is stored as bits/mask pair. The mask has a 1 for each
     // position in the string, and bits holds the actual bit values.
     // NLB count for a single string = popcount(mask) - 1 (subtract the leading bit).
     // For empty strings (mask==0), NLB contribution is 0.
-    simd_uint8_mask has_bits = (tmp_masks > 0);
-    simd_uint8 per_elem = simd_popcount8(tmp_masks);
-    stdx::where(has_bits, per_elem) = per_elem - simd_uint8(1);
+    simd_uint16_mask has_bits = (tmp_masks > 0);
+    simd_uint16 per_elem = simd_popcount16(tmp_masks);
+    stdx::where(has_bits, per_elem) = per_elem - simd_uint16(1);
     // Build inclusive prefix sum: nlb_counts[i] = total NLB in lanes 0..i
-    simd_uint8 nlb_counts;
+    simd_uint16 nlb_counts;
     nlb_counts[0] = per_elem[0];
     for (size_t n = 1; n < 8; n++) {
         nlb_counts[n] = nlb_counts[n-1] + per_elem[n];
     }
     // nlb_before[i] = total NLB in lanes 0..i-1 (exclusive prefix sum)
-    simd_uint8 nlb_before = nlb_counts - per_elem;
+    simd_uint16 nlb_before = nlb_counts - per_elem;
 
-    // --- Per-lane predicates vectorized via simd<int16_t, 8> ---
+    // --- Per-lane predicates (unified uint16 — no narrowing needed) ---
     // tmp_levels is alignas(16), so copy_from/copy_to are safe.
     // smaller_than_p: lane i's level is at or before the priority index pindex.
     // all_filled_after: from lane i onward, every remaining level slot is occupied.
-    simd_int16 lev;
+    simd_uint16 lev;
     lev.copy_from(tmp_levels, stdx::element_aligned);
 
     // smaller_than_p[i]: tmp_levels[i] <= pindex
-    simd_int16_mask stp16_mask = (lev <= simd_int16(static_cast<int16_t>(pindex)));
+    simd_uint16_mask stp_mask = (lev <= simd_uint16(static_cast<uint16_t>(pindex)));
 
     // all_filled_after[i]: tmp_levels[i] == (h-1-tmp_nlanes) + i
     //   levels are non-decreasing and cover [levels[0], h-2] with no gaps iff this holds.
-    simd_int16 expected_afa =
-        simd_int16(static_cast<int16_t>(h - 1 - static_cast<int>(tmp_nlanes))) + LANE_INDICES_I16;
-    simd_int16_mask afa16_mask = (lev == expected_afa);
+    simd_uint16 expected_afa =
+        simd_uint16(static_cast<uint16_t>(h - 1 - static_cast<int>(tmp_nlanes))) + LANE_INDICES;
+    simd_uint16_mask afa_mask = (lev == expected_afa);
 
-    // Convert simd_int16_mask -> simd_uint8 for blending with the existing uint8 logic.
-    // Set int16 simd to 1 where the mask is true, 0 elsewhere; then narrow to uint8.
-    // The 8-iteration narrowing loop is folded into a single pack instruction by the compiler.
-    simd_int16 stp_i16(0), afa_i16(0);
-    stdx::where(stp16_mask, stp_i16) = simd_int16(1);
-    stdx::where(afa16_mask, afa_i16) = simd_int16(1);
-    alignas(8) uint8_t stp_u8[8], afa_u8[8];
-    for (int i = 0; i < 8; i++) { stp_u8[i] = static_cast<uint8_t>(stp_i16[i]); }
-    for (int i = 0; i < 8; i++) { afa_u8[i] = static_cast<uint8_t>(afa_i16[i]); }
-    simd_uint8 stp_v, afa_v;
-    stp_v.copy_from(stp_u8, stdx::element_aligned);
-    afa_v.copy_from(afa_u8, stdx::element_aligned);
-    simd_uint8_mask smaller_than_p = has_bits and (stp_v > simd_uint8(0));
+    // With unified uint16, level predicates are directly usable as masks —
+    // no int16→uint8 narrowing conversion needed.
+    simd_uint16_mask smaller_than_p = has_bits and stp_mask;
 
     // --- Determine which lanes have no valid successor (are "stuck") ---
-    // clear_first_bit = 0xFE: mask to ignore bit position 0 (the leading bit).
+    // clear_first_bit = 0xFFFE: mask to ignore bit position 0 (the leading bit).
     // pattern_zero_and_ones: what the bits look like if leading bit is 0 and
     //   all NLB positions are 1 (i.e., the string is 01^j).
-    simd_uint8 clear_first_bit(~simd_uint8{0} & ~1);
-    simd_uint8 pattern_zero_and_ones = tmp_masks & clear_first_bit;
+    simd_uint16 clear_first_bit(static_cast<uint16_t>(0xFFFE));
+    simd_uint16 pattern_zero_and_ones = tmp_masks & clear_first_bit;
 
     // A lane has no successor when:
     //   1) nlb_before == t: all t NLB slots are already used in earlier lanes, OR
@@ -163,13 +229,14 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     //      a) bits == 01^j pattern AND all levels after this are filled (can't reset
     //         downward because there's nowhere to put new strings), OR
     //      b) bits == mask, i.e. all positions are 1 (string is 1^j, maximum value)
-    simd_uint8_mask no_successor = has_bits and ((nlb_before == t) or ((nlb_counts == t) and (
-             ((tmp_bits == pattern_zero_and_ones) and (afa_v > simd_uint8(0)))
+    simd_uint16 t16(static_cast<uint16_t>(t));
+    simd_uint16_mask no_successor = has_bits and ((nlb_before == t16) or ((nlb_counts == t16) and (
+             ((tmp_bits == pattern_zero_and_ones) and afa_mask)
           or (tmp_bits == tmp_masks)))
     );
 
     // A lane has a successor if it's before pindex, non-empty, and not stuck.
-    simd_uint8_mask has_successor = smaller_than_p and has_bits and !no_successor;
+    simd_uint16_mask has_successor = smaller_than_p and has_bits and !no_successor;
 
     // --- Find the rightmost (highest-index) lane that can be incremented ---
     // We search from the right so that the resulting measure is the smallest
@@ -182,7 +249,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         {
             // Already at the maximum for this level structure => overflow to Top
             tmp_nlanes = 1;
-            tmp_levels[0] = int16_t(-1);
+            tmp_levels[0] = TOP_SENTINEL;
             fill_inactive_tmp();
             return;
         }
@@ -192,7 +259,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // (the smallest non-empty bitstring with leading bit 1).
             tmp_bits[0] = 1;
             match = 0;
-            tmp_levels[0] = static_cast<int16_t>(std::min(static_cast<int>(tmp_levels[0]) - 1, pindex));
+            tmp_levels[0] = static_cast<uint16_t>(std::min(static_cast<int>(tmp_levels[0]) - 1, pindex));
         }
     }
     else if (nlb_counts[match] == t)
@@ -204,8 +271,9 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         // countl_one on (bits | ~mask) counts consecutive 1s from the MSB of
         // the used portion — these are the trailing ones in the bitstring.
         // +1 includes the zero bit that precedes them (the "carry" position).
+        // Note: bitstrings are always ≤8 bits wide; cast to uint8_t for countl_one.
         int reset_bits = std::countl_one(static_cast<uint8_t>(tmp_bits[match] | ~tmp_masks[match])) + 1;
-        int current_bits = std::popcount(static_cast<uint8_t>(tmp_masks[match]));
+        int current_bits = std::popcount(static_cast<uint16_t>(tmp_masks[match]));
         // Clear the top reset_bits positions in both bits and mask:
         // (1 << (8 - reset_bits)) - 1 produces a mask keeping only the lower bits.
         tmp_bits[match] &= (1u << (8-reset_bits)) - 1;
@@ -214,11 +282,11 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         {
             // Partial reset: some bits remain in this lane. Update NLB count
             // and move to the next lane for the tail fill.
-            nlb_counts[match] -= current_bits - std::popcount(static_cast<uint8_t>(tmp_masks[match]));
+            nlb_counts[match] -= current_bits - std::popcount(static_cast<uint16_t>(tmp_masks[match]));
             match++;
             if (match < k-1)
             {
-                tmp_levels[match] = static_cast<int16_t>(static_cast<int>(tmp_levels[match-1]) + 1);
+                tmp_levels[match] = static_cast<uint16_t>(static_cast<int>(tmp_levels[match-1]) + 1);
                 tmp_bits[match] = 0;
             }
         }
@@ -232,10 +300,10 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             {
                 // There's a gap — place this empty string at the next level.
                 tmp_levels[match] = (match + 1 == tmp_nlanes)
-                    ? static_cast<int16_t>(static_cast<int>(tmp_levels[match]) + 1)
-                    : static_cast<int16_t>(static_cast<int>(tmp_levels[match + 1]) - 1);
+                    ? static_cast<uint16_t>(static_cast<int>(tmp_levels[match]) + 1)
+                    : static_cast<uint16_t>(static_cast<int>(tmp_levels[match + 1]) - 1);
             }
-            else tmp_levels[match] = static_cast<int16_t>(static_cast<int>(tmp_levels[match]) + 1);
+            else tmp_levels[match] = static_cast<uint16_t>(static_cast<int>(tmp_levels[match]) + 1);
         }
     }
     else
@@ -248,13 +316,13 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // start a new string there with leading bit 1.
             match++;
             tmp_bits[match] = 1;
-            tmp_levels[match] = static_cast<int16_t>(std::min(pindex, static_cast<int>(tmp_levels[match]) - 1));
+            tmp_levels[match] = static_cast<uint16_t>(std::min(pindex, static_cast<int>(tmp_levels[match]) - 1));
         }
         else
         {
             // Extend the current string by setting the next bit position.
             // first_new = current string length = popcount(mask).
-            int first_new = std::popcount(static_cast<uint8_t>(tmp_masks[match]));
+            int first_new = std::popcount(static_cast<uint16_t>(tmp_masks[match]));
             tmp_bits[match] |= (1u << first_new);
         }
     }
@@ -267,7 +335,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         tmp_masks[match] = (1u << (t - bits_before + 1)) - 1;
 
         // Append new single-bit strings at consecutive levels after 'match'.
-        // Vectorized via simd<int16_t, 8>: compute the fill range, blend into tmp_levels.
+        // Vectorized via simd<uint16_t, 8>: compute the fill range, blend into tmp_levels.
         const int set_to_level = static_cast<int>(tmp_levels[match]) + 1;
         // max_fill: bounded by remaining lane budget (k-2-match) and height budget (h-2-levels[match]).
         // Derivation: original loop ran while nlanes < k-1 AND level <= h-2.
@@ -278,23 +346,23 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // fill_lev[i] = (set_to_level - (match+1)) + i
             //   => fill_lev[match+1] = set_to_level,  fill_lev[match+2] = set_to_level+1, ...
             // set_to_level >= match+1 because levels are non-decreasing (tmp_levels[match] >= match).
-            const simd_int16 fill_lev =
-                simd_int16(static_cast<int16_t>(set_to_level - (match + 1))) + LANE_INDICES_I16;
-            simd_int16 result;
+            const simd_uint16 fill_lev =
+                simd_uint16(static_cast<uint16_t>(set_to_level - (match + 1))) + LANE_INDICES;
+            simd_uint16 result;
             result.copy_from(tmp_levels, stdx::element_aligned);
             // Blend: write fill_lev only into lanes [match+1, match+1+max_fill).
-            const simd_int16_mask in_range =
-                (LANE_INDICES_I16 >= simd_int16(static_cast<int16_t>(match + 1))) and
-                (LANE_INDICES_I16 <  simd_int16(static_cast<int16_t>(match + 1 + max_fill)));
+            const simd_uint16_mask in_range =
+                (LANE_INDICES >= simd_uint16(static_cast<uint16_t>(match + 1))) and
+                (LANE_INDICES <  simd_uint16(static_cast<uint16_t>(match + 1 + max_fill)));
             stdx::where(in_range, result) = fill_lev;
             result.copy_to(tmp_levels, stdx::element_aligned);
         }
         // SIMD bulk-set: for all lanes in (match, tmp_nlanes), set mask=1, bits=0.
         // Lanes beyond tmp_nlanes are zeroed by fill_inactive_tmp below.
-        simd_uint8_mask after_match_mask   = LANE_INDICES > simd_uint8(static_cast<uint8_t>(match));
-        simd_uint8_mask before_levels_mask = LANE_INDICES < simd_uint8(tmp_nlanes);
-        stdx::where(before_levels_mask and after_match_mask, tmp_masks) = 1;
-        stdx::where(after_match_mask, tmp_bits) = 0;
+        simd_uint16_mask after_match_mask   = LANE_INDICES > simd_uint16(static_cast<uint16_t>(match));
+        simd_uint16_mask before_levels_mask = LANE_INDICES < simd_uint16(tmp_nlanes);
+        stdx::where(before_levels_mask and after_match_mask, tmp_masks) = simd_uint16(1);
+        stdx::where(after_match_mask, tmp_bits) = simd_uint16(0);
 
         fill_inactive_tmp();
     }
@@ -307,7 +375,7 @@ void
 STRPM_SIMDSolver::stream_pm(std::ostream &out, int idx)
 {
     uint8_t nlanes = pm[idx].nlanes;
-    if (nlanes > 0 and pm[idx].levels[0] == -1) {
+    if (nlanes > 0 and pm[idx].levels[0] == TOP_SENTINEL) {
         out << " \033[1;33mTop\033[m";
     } else {
         out << " { ";
@@ -334,9 +402,9 @@ STRPM_SIMDSolver::stream_pm(std::ostream &out, int idx)
  * Write SIMD state to ostream.
  */
 void
-STRPM_SIMDSolver::stream_simd(std::ostream &out, simd_uint8& bits, simd_uint8& masks, int16_t* levels, uint8_t nlanes)
+STRPM_SIMDSolver::stream_simd(std::ostream &out, simd_uint16& bits, simd_uint16& masks, uint16_t* levels, uint8_t nlanes)
 {
-    if (nlanes > 0 and levels[0] == -1) {
+    if (nlanes > 0 and levels[0] == TOP_SENTINEL) {
         out << " \033[1;33mTop\033[m";
     } else {
         out << " { ";
@@ -378,9 +446,51 @@ STRPM_SIMDSolver::compare(int pindex)
     }
 
     // cases involving Top
-    if (tmp_levels[0] == -1 and best_levels[0] == -1) return 0;
-    if (tmp_levels[0] == -1) return 1;
-    if (best_levels[0] == -1) return -1;
+    if (tmp_levels[0] == TOP_SENTINEL and best_levels[0] == TOP_SENTINEL) return 0;
+    if (tmp_levels[0] == TOP_SENTINEL) return 1;
+    if (best_levels[0] == TOP_SENTINEL) return -1;
+
+    // --- k=2 specialization: at most 1 active lane, skip SIMD precompute ---
+    if (k == 2)
+    {
+        // Unequal nlanes: one has a string, the other doesn't
+        if (tmp_nlanes == 0 and best_nlanes == 0) return 0;
+        if (tmp_nlanes > best_nlanes) return (tmp_bits[0] & 1) == 0 ? -1 : 1;
+        if (best_nlanes > tmp_nlanes) return (best_bits[0] & 1) == 0 ? 1 : -1;
+
+        // Both have exactly 1 lane. Compare levels then bitstrings.
+        int tl = tmp_levels[0], bl = best_levels[0];
+        if (tl > pindex and bl > pindex) return 0;
+        if ((tl <= pindex and bl > pindex) or (tl < bl))
+            return (tmp_bits[0] & 1) == 0 ? -1 : 1;
+        if ((tl > pindex and bl <= pindex) or (tl > bl))
+            return (best_bits[0] & 1) == 0 ? 1 : -1;
+
+        // Same level: inline scalar bitstring comparison for lane 0.
+        uint16_t tm = tmp_masks[0], bm = best_masks[0];
+        uint16_t tb = tmp_bits[0],  bb = best_bits[0];
+        if (tm == bm and tb == bb) return 0;
+
+        uint16_t shorter = tm & bm;
+        uint16_t d = tm ^ bm;
+        uint16_t fld = d & ~(d << 1);
+        uint16_t bxor = tb ^ bb;
+        uint16_t comb = shorter + fld;
+        uint16_t rxor = bxor & comb;
+
+        // Length-based comparison
+        bool al = (tm < bm and rxor == fld) or (tm > bm and rxor == 0);
+        bool bl2 = (bm < tm and rxor == fld) or (bm > tm and rxor == 0);
+        // Bit-based comparison within shared prefix
+        uint16_t dbits = shorter & bxor;
+        uint16_t fbd = dbits & (uint16_t(0) - dbits);
+        bool ag = (dbits > 0) and ((tb & fbd) > 0);
+        bool bg = (dbits > 0) and ((bb & fbd) > 0);
+
+        if (ag or (!al and bl2)) return 1;
+        if (bg or (al and !bl2)) return -1;
+        return 0;
+    }
 
     // --- SIMD precomputation: compare all 8 bitstrings in parallel ---
     // Each bitstring is encoded as (bits, mask) where mask indicates which
@@ -393,33 +503,32 @@ STRPM_SIMDSolver::compare(int pindex)
     //   diff & ~(diff << 1) clears all but the least-significant 1 in each
     //   contiguous run of 1s in diff, giving us the first position where one
     //   string is longer than the other.
-    simd_uint8 shorter_string = tmp_masks & best_masks;
-    simd_uint8 diff = tmp_masks ^ best_masks;
-    simd_uint8 first_length_difference = diff & ~(diff << 1);
-    simd_uint8 bit_xor = tmp_bits ^ best_bits;
+    simd_uint16 shorter_string = tmp_masks & best_masks;
+    simd_uint16 diff = tmp_masks ^ best_masks;
+    simd_uint16 first_length_difference = diff & ~(diff << 1);
+    simd_uint16 bit_xor = tmp_bits ^ best_bits;
     // combined = shared positions + the first extra position.
     // relevant_xor = bit differences within this relevant region.
-    simd_uint8 combined     = shorter_string + first_length_difference;
-    simd_uint8 relevant_xor = bit_xor & combined;
+    simd_uint16 combined     = shorter_string + first_length_difference;
+    simd_uint16 relevant_xor = bit_xor & combined;
     // a_less: tmp's string is shorter (fewer mask bits) and the extra bit in
     //   best is different from tmp (relevant_xor matches the length diff), OR
     //   tmp is longer but all shared bits are identical (the extra 0-extension wins).
-    simd_uint8_mask a_less = ((tmp_masks < best_masks) and (relevant_xor == first_length_difference)) or
-                             ((tmp_masks > best_masks) and (relevant_xor == 0));
-    simd_uint8_mask b_less = ((best_masks < tmp_masks) and (relevant_xor == first_length_difference)) or
-                             ((best_masks > tmp_masks) and (relevant_xor == 0));
+    simd_uint16_mask a_less = ((tmp_masks < best_masks) and (relevant_xor == first_length_difference)) or
+                             ((tmp_masks > best_masks) and (relevant_xor == simd_uint16(0)));
+    simd_uint16_mask b_less = ((best_masks < tmp_masks) and (relevant_xor == first_length_difference)) or
+                             ((best_masks > tmp_masks) and (relevant_xor == simd_uint16(0)));
 
     // For strings of equal length (or within the shared prefix), find the
     // first bit position where they differ and check who has the 1.
     // different_bits: positions in the shared region where bits disagree.
     // Isolate the lowest such bit with x & (-x) (two's complement trick).
-    simd_uint8 different_bits = (shorter_string & bit_xor);
-    simd_uint8 first_bit_difference = different_bits & (simd_uint8(0) - different_bits);
-    simd_uint8_mask a_greater = (different_bits > 0) and ((tmp_bits & first_bit_difference) > 0);
-    simd_uint8_mask b_greater = (different_bits > 0) and ((best_bits & first_bit_difference) > 0);
+    simd_uint16 different_bits = (shorter_string & bit_xor);
+    simd_uint16 first_bit_difference = different_bits & (simd_uint16(0) - different_bits);
+    simd_uint16_mask a_greater = (different_bits > simd_uint16(0)) and ((tmp_bits & first_bit_difference) > simd_uint16(0));
+    simd_uint16_mask b_greater = (different_bits > simd_uint16(0)) and ((best_bits & first_bit_difference) > simd_uint16(0));
 
     // --- Scalar level loop ---
-    // Levels are int (can exceed 255), so we iterate scalarly over lanes.
     // The SIMD-precomputed a_greater/b_greater/a_less/b_less masks tell us
     // the bitstring comparison result for each lane at O(1) cost.
     uint8_t max_nlanes = std::max(tmp_nlanes, best_nlanes);
@@ -469,7 +578,7 @@ bool
 STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
 {
     // check if already Top
-    if (pm[v].nlanes > 0 and pm[v].levels[0] == -1) return false; // already Top
+    if (pm[v].nlanes > 0 and pm[v].levels[0] == TOP_SENTINEL) return false; // already Top
 
     const int pr = priority(v);
     const int pindex = pl == 0 ? (h-1)-(pr+1)/2-1 : (h-1)-pr/2-1;
@@ -552,10 +661,10 @@ STRPM_SIMDSolver::lift(int v, int target, int &str, int pl)
             tmp_to_best();
             str = to;
             // Early exit: if first successor already at Top and we want max, done
-            if (want_max and best_nlanes > 0 and best_levels[0] == -1) break;
+            if (want_max and best_nlanes > 0 and best_levels[0] == TOP_SENTINEL) break;
         } else if (want_max) {
             // Early exit: Top is unsurpassable for max
-            if (tmp_nlanes > 0 and tmp_levels[0] == -1) {
+            if (tmp_nlanes > 0 and tmp_levels[0] == TOP_SENTINEL) {
                 tmp_to_best();
                 str = to;
                 break;
@@ -773,11 +882,11 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     // Build the initial NodePM pattern once, then fill the entire vector with it.
     NodePM init{};
     init.nlanes  = static_cast<uint8_t>(k - 1);
-    init.masks[0] = static_cast<uint8_t>((1 << (t+1)) - 1);
+    init.masks[0] = static_cast<uint16_t>((1 << (t+1)) - 1);
     // init.levels[0] = 0 already (zero-initialised by NodePM{})
     for (int i = 1; i < k-1; i++)
     {
-        init.levels[i] = static_cast<int16_t>(i);
+        init.levels[i] = static_cast<uint16_t>(i);
         init.masks[i]  = 1;
     }
     pm.assign(nc, init);
@@ -833,7 +942,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
 
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
-        if (pm[v].nlanes == 0 or pm[v].levels[0] != -1) {
+        if (pm[v].nlanes == 0 or pm[v].levels[0] != TOP_SENTINEL) {
             if (owner(v) != player) {
                 // TODO: don't rely on the strategy array in the Game class
                 if (lift(v, -1, game.getStrategy()[v], player)) logger << "error: " << v << " is not progressive!" << std::endl;
@@ -848,7 +957,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
             logger << "\033[1m" << label_vertex(v) << (owner(v)?" (odd)":" (even)") << "\033[m:";
             stream_pm(logger, v);
 
-            if (pm[v].nlanes == 0 or pm[v].levels[0] != -1) {
+            if (pm[v].nlanes == 0 or pm[v].levels[0] != TOP_SENTINEL) {
                 if (owner(v) != player) {
                     logger << " => " << label_vertex(game.getStrategy(v));
                 }
@@ -864,7 +973,7 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
 
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
-        if (pm[v].nlanes == 0 or pm[v].levels[0] != -1) Solver::solve(v, 1-player, game.getStrategy(v));
+        if (pm[v].nlanes == 0 or pm[v].levels[0] != TOP_SENTINEL) Solver::solve(v, 1-player, game.getStrategy(v));
     }
 
     Solver::flush();
@@ -881,7 +990,7 @@ STRPM_SIMDSolver::run()
     int h1 = (max_prio+1)/2;
 
     int h_max = std::max(h0, h1);
-    assert(h_max < 32767); // levels stored as int16_t; max_prio must be < 65534
+    assert(h_max < 65535); // levels stored as uint16_t; 0xFFFF reserved for Top
     int k_max = std::min(t_max + 2, h_max);
 
     // create datastructures
