@@ -22,6 +22,15 @@
 #include <cstring>
 #include <cstddef>
 
+// Architecture detection for native SIMD prefix sum
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#define STRPM_SIMD_SSE2 1
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define STRPM_SIMD_NEON 1
+#endif
+
 namespace stdx = std::experimental;
 
 // Unified uint16 SIMD type: bits, masks, and levels all share the same lane
@@ -39,6 +48,53 @@ inline simd_u16x8 simd_popcount_u16x8(simd_u16x8 x) noexcept {
     x = (x & simd_u16x8(0x3333)) + ((x >> 2) & simd_u16x8(0x3333));  // 4-bit sums
     x = (x + (x >> 4)) & simd_u16x8(0x0F0F);                          // 8-bit sums
     return (x + (x >> 8)) & simd_u16x8(0x00FF);                       // 16-bit sum (0..16)
+}
+
+// Inclusive prefix sum over 8 uint16 lanes: result[i] = sum(x[0..i]).
+// Three-step parallel scan (log2(8) dependent adds) vs 7 sequential adds.
+// SSE2 and NEON paths use native intrinsics; fallback uses scalar element access.
+inline simd_u16x8 simd_prefix_sum_inclusive_u16x8(simd_u16x8 x) noexcept {
+#if defined(STRPM_SIMD_SSE2)
+    // Marshal simd_u16x8 → __m128i via aligned buffer (compiler elides the memops).
+    alignas(16) uint16_t buf[8];
+    x.copy_to(buf, stdx::vector_aligned);
+    __m128i v = _mm_load_si128(reinterpret_cast<const __m128i*>(buf));
+    // Step 1: add neighbor — shift left by 1 lane (2 bytes), add
+    v = _mm_add_epi16(v, _mm_slli_si128(v, 2));
+    // Step 2: add pair — shift left by 2 lanes (4 bytes), add
+    v = _mm_add_epi16(v, _mm_slli_si128(v, 4));
+    // Step 3: add quad — shift left by 4 lanes (8 bytes), add
+    v = _mm_add_epi16(v, _mm_slli_si128(v, 8));
+    // Marshal __m128i → simd_u16x8
+    _mm_store_si128(reinterpret_cast<__m128i*>(buf), v);
+    simd_u16x8 result;
+    result.copy_from(buf, stdx::vector_aligned);
+    return result;
+#elif defined(STRPM_SIMD_NEON)
+    // Marshal simd_u16x8 → uint16x8_t via aligned buffer (compiler elides the memops).
+    alignas(16) uint16_t buf[8];
+    x.copy_to(buf, stdx::vector_aligned);
+    uint16x8_t v = vld1q_u16(buf);
+    uint16x8_t zero = vdupq_n_u16(0);
+    // Step 1: shift left by 1 lane, add
+    v = vaddq_u16(v, vextq_u16(zero, v, 7));
+    // Step 2: shift left by 2 lanes, add
+    v = vaddq_u16(v, vextq_u16(zero, v, 6));
+    // Step 3: shift left by 4 lanes, add
+    v = vaddq_u16(v, vextq_u16(zero, v, 4));
+    // Marshal uint16x8_t → simd_u16x8
+    vst1q_u16(buf, v);
+    simd_u16x8 result;
+    result.copy_from(buf, stdx::vector_aligned);
+    return result;
+#else
+    // Fallback: sequential prefix sum via std::experimental::simd element access
+    simd_u16x8 result;
+    result[0] = x[0];
+    for (int i = 1; i < 8; i++)
+        result[i] = result[i-1] + x[i];
+    return result;
+#endif
 }
 
 // Precomputed lane index vector [0,1,2,...,7] for uint16.

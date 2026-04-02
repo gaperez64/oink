@@ -117,11 +117,8 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     simd_u16x8 per_elem = simd_popcount_u16x8(tmp_masks);
     stdx::where(has_bits, per_elem) = per_elem - simd_u16x8(1);
     // Build inclusive prefix sum: nlb_counts[i] = total NLB in lanes 0..i
-    simd_u16x8 nlb_counts;
-    nlb_counts[0] = per_elem[0];
-    for (size_t n = 1; n < 8; n++) {
-        nlb_counts[n] = nlb_counts[n-1] + per_elem[n];
-    }
+    // Uses parallel scan (3 dependent steps) on SSE2/NEON, sequential fallback otherwise.
+    simd_u16x8 nlb_counts = simd_prefix_sum_inclusive_u16x8(per_elem);
     // nlb_before[i] = total NLB in lanes 0..i-1 (exclusive prefix sum)
     simd_u16x8 nlb_before = nlb_counts - per_elem;
 
