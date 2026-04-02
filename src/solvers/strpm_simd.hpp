@@ -28,21 +28,21 @@ namespace stdx = std::experimental;
 // width.  This eliminates the costly int16→uint8 narrowing conversion that was
 // previously required to blend level predicates with bitstring operations.
 // Top sentinel: 0xFFFF (was -1 as int16_t).
-using simd_uint16      = stdx::fixed_size_simd<uint16_t, 8>;
-using simd_uint16_mask = stdx::fixed_size_simd_mask<uint16_t, 8>;
+using simd_u16x8      = stdx::fixed_size_simd<uint16_t, 8>;
+using simd_u16x8_mask = stdx::fixed_size_simd_mask<uint16_t, 8>;
 
 // Bit-parallel popcount for all 8 uint16 lanes simultaneously.
 // Bitstring values never exceed 8 bits, so upper bytes are always zero;
 // the extra reduction step (vs the old uint8 version) is one SIMD op.
-inline simd_uint16 simd_popcount16(simd_uint16 x) noexcept {
-    x = x - ((x >> 1) & simd_uint16(0x5555));                          // 2-bit sums
-    x = (x & simd_uint16(0x3333)) + ((x >> 2) & simd_uint16(0x3333));  // 4-bit sums
-    x = (x + (x >> 4)) & simd_uint16(0x0F0F);                          // 8-bit sums
-    return (x + (x >> 8)) & simd_uint16(0x00FF);                       // 16-bit sum (0..16)
+inline simd_u16x8 simd_popcount_u16x8(simd_u16x8 x) noexcept {
+    x = x - ((x >> 1) & simd_u16x8(0x5555));                          // 2-bit sums
+    x = (x & simd_u16x8(0x3333)) + ((x >> 2) & simd_u16x8(0x3333));  // 4-bit sums
+    x = (x + (x >> 4)) & simd_u16x8(0x0F0F);                          // 8-bit sums
+    return (x + (x >> 8)) & simd_u16x8(0x00FF);                       // 16-bit sum (0..16)
 }
 
 // Precomputed lane index vector [0,1,2,...,7] for uint16.
-static const simd_uint16 LANE_INDICES{[](uint16_t i){ return i; }};
+static const simd_u16x8 LANE_INDICES{[](uint16_t i){ return i; }};
 
 static constexpr uint16_t TOP_SENTINEL = 0xFFFF;
 
@@ -96,13 +96,13 @@ protected:
     // h is asserted < 32767 at startup so uint16_t always suffices.
     std::vector<NodePM>   pm;
 
-    simd_uint16 tmp_bits;
-    simd_uint16 tmp_masks;
+    simd_u16x8 tmp_bits;
+    simd_u16x8 tmp_masks;
     alignas(16) uint16_t tmp_levels[8]; // alignas(16) for simd copy_from/copy_to
     uint8_t tmp_nlanes;
 
-    simd_uint16 best_bits;
-    simd_uint16 best_masks;
+    simd_u16x8 best_bits;
+    simd_u16x8 best_masks;
     alignas(16) uint16_t best_levels[8];
     uint8_t best_nlanes;
 
@@ -121,7 +121,7 @@ protected:
     inline void to_tmp(int idx) {
         tmp_bits.copy_from(&pm[idx].bits[0], stdx::element_aligned);
         tmp_masks.copy_from(&pm[idx].masks[0], stdx::element_aligned);
-        simd_uint16 lev;
+        simd_u16x8 lev;
         lev.copy_from(&pm[idx].levels[0], stdx::element_aligned);
         lev.copy_to(tmp_levels, stdx::element_aligned);
         tmp_nlanes = pm[idx].nlanes;
@@ -130,7 +130,7 @@ protected:
     inline void from_tmp(int idx) {
         tmp_bits.copy_to(&pm[idx].bits[0], stdx::element_aligned);
         tmp_masks.copy_to(&pm[idx].masks[0], stdx::element_aligned);
-        simd_uint16 lev;
+        simd_u16x8 lev;
         lev.copy_from(tmp_levels, stdx::element_aligned);
         lev.copy_to(&pm[idx].levels[0], stdx::element_aligned);
         pm[idx].nlanes = tmp_nlanes;
@@ -139,7 +139,7 @@ protected:
     inline void to_best(int idx) {
         best_bits.copy_from(&pm[idx].bits[0], stdx::element_aligned);
         best_masks.copy_from(&pm[idx].masks[0], stdx::element_aligned);
-        simd_uint16 lev;
+        simd_u16x8 lev;
         lev.copy_from(&pm[idx].levels[0], stdx::element_aligned);
         lev.copy_to(best_levels, stdx::element_aligned);
         best_nlanes = pm[idx].nlanes;
@@ -148,7 +148,7 @@ protected:
     inline void from_best(int idx) {
         best_bits.copy_to(&pm[idx].bits[0], stdx::element_aligned);
         best_masks.copy_to(&pm[idx].masks[0], stdx::element_aligned);
-        simd_uint16 lev;
+        simd_u16x8 lev;
         lev.copy_from(best_levels, stdx::element_aligned);
         lev.copy_to(&pm[idx].levels[0], stdx::element_aligned);
         pm[idx].nlanes = best_nlanes;
@@ -163,15 +163,15 @@ protected:
 
     // Zero out inactive lanes' bits and masks (levels are scalar, not touched)
     inline void fill_inactive_tmp() {
-        simd_uint16_mask inactive = LANE_INDICES >= simd_uint16(tmp_nlanes);
-        stdx::where(inactive, tmp_bits) = simd_uint16(0);
-        stdx::where(inactive, tmp_masks) = simd_uint16(0);
+        simd_u16x8_mask inactive = LANE_INDICES >= simd_u16x8(tmp_nlanes);
+        stdx::where(inactive, tmp_bits) = simd_u16x8(0);
+        stdx::where(inactive, tmp_masks) = simd_u16x8(0);
     }
 
     // Render pm[idx] to given ostream
     void stream_pm(std::ostream &out, int idx);
     // Render SIMD to given ostream
-    void stream_simd(std::ostream &out, simd_uint16& bits, simd_uint16& masks, uint16_t* levels, uint8_t nlanes);
+    void stream_simd(std::ostream &out, simd_u16x8& bits, simd_u16x8& masks, uint16_t* levels, uint8_t nlanes);
 
     // Compare tmp to best
     int compare(int pindex);
