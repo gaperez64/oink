@@ -154,12 +154,12 @@ protected:
 
     simd_u16x8 tmp_bits;
     simd_u16x8 tmp_masks;
-    alignas(16) uint16_t tmp_levels[8]; // alignas(16) for simd copy_from/copy_to
+    simd_u16x8 tmp_levels;
     uint8_t tmp_nlanes;
 
     simd_u16x8 best_bits;
     simd_u16x8 best_masks;
-    alignas(16) uint16_t best_levels[8];
+    simd_u16x8 best_levels;
     uint8_t best_nlanes;
 
     uintqueue Q;
@@ -177,47 +177,39 @@ protected:
     inline void to_tmp(int idx) {
         tmp_bits.copy_from(&pm[idx].bits[0], stdx::element_aligned);
         tmp_masks.copy_from(&pm[idx].masks[0], stdx::element_aligned);
-        simd_u16x8 lev;
-        lev.copy_from(&pm[idx].levels[0], stdx::element_aligned);
-        lev.copy_to(tmp_levels, stdx::element_aligned);
+        tmp_levels.copy_from(&pm[idx].levels[0], stdx::element_aligned);
         tmp_nlanes = pm[idx].nlanes;
     }
     // Copy tmp into pm[idx]
     inline void from_tmp(int idx) {
         tmp_bits.copy_to(&pm[idx].bits[0], stdx::element_aligned);
         tmp_masks.copy_to(&pm[idx].masks[0], stdx::element_aligned);
-        simd_u16x8 lev;
-        lev.copy_from(tmp_levels, stdx::element_aligned);
-        lev.copy_to(&pm[idx].levels[0], stdx::element_aligned);
+        tmp_levels.copy_to(&pm[idx].levels[0], stdx::element_aligned);
         pm[idx].nlanes = tmp_nlanes;
     }
     // Copy pm[idx] into best
     inline void to_best(int idx) {
         best_bits.copy_from(&pm[idx].bits[0], stdx::element_aligned);
         best_masks.copy_from(&pm[idx].masks[0], stdx::element_aligned);
-        simd_u16x8 lev;
-        lev.copy_from(&pm[idx].levels[0], stdx::element_aligned);
-        lev.copy_to(best_levels, stdx::element_aligned);
+        best_levels.copy_from(&pm[idx].levels[0], stdx::element_aligned);
         best_nlanes = pm[idx].nlanes;
     }
     // Copy best into pm[idx]
     inline void from_best(int idx) {
         best_bits.copy_to(&pm[idx].bits[0], stdx::element_aligned);
         best_masks.copy_to(&pm[idx].masks[0], stdx::element_aligned);
-        simd_u16x8 lev;
-        lev.copy_from(best_levels, stdx::element_aligned);
-        lev.copy_to(&pm[idx].levels[0], stdx::element_aligned);
+        best_levels.copy_to(&pm[idx].levels[0], stdx::element_aligned);
         pm[idx].nlanes = best_nlanes;
     }
     // Copy tmp into best
     inline void tmp_to_best() {
         best_bits = tmp_bits;
         best_masks = tmp_masks;
-        std::memcpy(best_levels, tmp_levels, 8 * sizeof(uint16_t));
+        best_levels = tmp_levels;
         best_nlanes = tmp_nlanes;
     }
 
-    // Zero out inactive lanes' bits and masks (levels are scalar, not touched)
+    // Zero out inactive lanes' bits and masks
     inline void fill_inactive_tmp() {
         simd_u16x8_mask inactive = LANE_INDICES >= simd_u16x8(tmp_nlanes);
         stdx::where(inactive, tmp_bits) = simd_u16x8(0);
@@ -227,7 +219,7 @@ protected:
     // Render pm[idx] to given ostream
     void stream_pm(std::ostream &out, int idx);
     // Render SIMD to given ostream
-    void stream_simd(std::ostream &out, simd_u16x8& bits, simd_u16x8& masks, uint16_t* levels, uint8_t nlanes);
+    void stream_simd(std::ostream &out, simd_u16x8& bits, simd_u16x8& masks, simd_u16x8& levels, uint8_t nlanes);
 
     // Compare tmp to best
     int compare(int pindex);
