@@ -123,20 +123,18 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     simd_u16x8 nlb_before = nlb_counts - per_elem;
 
     // --- Per-lane predicates (unified uint16 — no narrowing needed) ---
-    // tmp_levels is alignas(16), so copy_from/copy_to are safe.
+    // tmp_levels is simd_u16x8, so predicates use it directly — no reload needed.
     // smaller_than_p: lane i's level is at or before the priority index pindex.
     // all_filled_after: from lane i onward, every remaining level slot is occupied.
-    simd_u16x8 lev;
-    lev.copy_from(tmp_levels, stdx::element_aligned);
 
     // smaller_than_p[i]: tmp_levels[i] <= pindex
-    simd_u16x8_mask stp_mask = (lev <= simd_u16x8(static_cast<uint16_t>(pindex)));
+    simd_u16x8_mask stp_mask = (tmp_levels <= simd_u16x8(static_cast<uint16_t>(pindex)));
 
     // all_filled_after[i]: tmp_levels[i] == (h-1-tmp_nlanes) + i
     //   levels are non-decreasing and cover [levels[0], h-2] with no gaps iff this holds.
     simd_u16x8 expected_afa =
         simd_u16x8(static_cast<uint16_t>(h - 1 - static_cast<int>(tmp_nlanes))) + LANE_INDICES;
-    simd_u16x8_mask afa_mask = (lev == expected_afa);
+    simd_u16x8_mask afa_mask = (tmp_levels == expected_afa);
 
     // With unified uint16, level predicates are directly usable as masks —
     // no int16→uint8 narrowing conversion needed.
@@ -185,7 +183,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // (the smallest non-empty bitstring with leading bit 1).
             tmp_bits[0] = 1;
             match = 0;
-            tmp_levels[0] = static_cast<uint16_t>(std::min(static_cast<int>(tmp_levels[0]) - 1, pindex));
+            tmp_levels[0] = static_cast<uint16_t>(std::min(static_cast<int>(tmp_levels[0]) - 1, pindex)); // min needs int for signedness
         }
     }
     else if (nlb_counts[match] == t)
@@ -197,8 +195,9 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         // countl_one on (bits | ~mask) counts consecutive 1s from the MSB of
         // the used portion — these are the trailing ones in the bitstring.
         // +1 includes the zero bit that precedes them (the "carry" position).
-        // Note: bitstrings are always ≤8 bits wide; cast to uint8_t for countl_one.
-        int reset_bits = std::countl_one(static_cast<uint8_t>(tmp_bits[match] | ~tmp_masks[match])) + 1;
+        // countl_one on uint16: upper 8 bits of ~mask are 0xFF (masks ≤ 8 bits),
+        // so countl_one(uint16) counts 8 extra ones; subtract to get the uint8 result.
+        int reset_bits = std::countl_one(static_cast<uint16_t>(tmp_bits[match] | ~tmp_masks[match])) - 8 + 1;
         int current_bits = std::popcount(static_cast<uint16_t>(tmp_masks[match]));
         // Clear the top reset_bits positions in both bits and mask:
         // (1 << (8 - reset_bits)) - 1 produces a mask keeping only the lower bits.
@@ -212,7 +211,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             match++;
             if (match < k-1)
             {
-                tmp_levels[match] = static_cast<uint16_t>(static_cast<int>(tmp_levels[match-1]) + 1);
+                tmp_levels[match] = tmp_levels[match-1] + 1;
                 tmp_bits[match] = 0;
             }
         }
@@ -226,10 +225,10 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             {
                 // There's a gap — place this empty string at the next level.
                 tmp_levels[match] = (match + 1 == tmp_nlanes)
-                    ? static_cast<uint16_t>(static_cast<int>(tmp_levels[match]) + 1)
-                    : static_cast<uint16_t>(static_cast<int>(tmp_levels[match + 1]) - 1);
+                    ? tmp_levels[match] + 1
+                    : tmp_levels[match + 1] - 1;
             }
-            else tmp_levels[match] = static_cast<uint16_t>(static_cast<int>(tmp_levels[match]) + 1);
+            else tmp_levels[match] = tmp_levels[match] + 1;
         }
     }
     else
@@ -242,7 +241,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // start a new string there with leading bit 1.
             match++;
             tmp_bits[match] = 1;
-            tmp_levels[match] = static_cast<uint16_t>(std::min(pindex, static_cast<int>(tmp_levels[match]) - 1));
+            tmp_levels[match] = static_cast<uint16_t>(std::min(pindex, static_cast<int>(tmp_levels[match]) - 1)); // min needs int for signedness
         }
         else
         {
@@ -274,14 +273,11 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
             // set_to_level >= match+1 because levels are non-decreasing (tmp_levels[match] >= match).
             const simd_u16x8 fill_lev =
                 simd_u16x8(static_cast<uint16_t>(set_to_level - (match + 1))) + LANE_INDICES;
-            simd_u16x8 result;
-            result.copy_from(tmp_levels, stdx::element_aligned);
-            // Blend: write fill_lev only into lanes [match+1, match+1+max_fill).
+            // Blend directly into tmp_levels (simd_u16x8 register — no load/store round-trip).
             const simd_u16x8_mask in_range =
                 (LANE_INDICES >= simd_u16x8(static_cast<uint16_t>(match + 1))) and
                 (LANE_INDICES <  simd_u16x8(static_cast<uint16_t>(match + 1 + max_fill)));
-            stdx::where(in_range, result) = fill_lev;
-            result.copy_to(tmp_levels, stdx::element_aligned);
+            stdx::where(in_range, tmp_levels) = fill_lev;
         }
         // SIMD bulk-set: for all lanes in (match, tmp_nlanes), set mask=1, bits=0.
         // Lanes beyond tmp_nlanes are zeroed by fill_inactive_tmp below.
@@ -328,7 +324,7 @@ STRPM_SIMDSolver::stream_pm(std::ostream &out, int idx)
  * Write SIMD state to ostream.
  */
 void
-STRPM_SIMDSolver::stream_simd(std::ostream &out, simd_u16x8& bits, simd_u16x8& masks, uint16_t* levels, uint8_t nlanes)
+STRPM_SIMDSolver::stream_simd(std::ostream &out, simd_u16x8& bits, simd_u16x8& masks, simd_u16x8& levels, uint8_t nlanes)
 {
     if (nlanes > 0 and levels[0] == TOP_SENTINEL) {
         out << " \033[1;33mTop\033[m";
@@ -454,50 +450,60 @@ STRPM_SIMDSolver::compare(int pindex)
     simd_u16x8_mask a_greater = (different_bits > simd_u16x8(0)) and ((tmp_bits & first_bit_difference) > simd_u16x8(0));
     simd_u16x8_mask b_greater = (different_bits > simd_u16x8(0)) and ((best_bits & first_bit_difference) > simd_u16x8(0));
 
-    // --- Scalar level loop ---
-    // The SIMD-precomputed a_greater/b_greater/a_less/b_less masks tell us
-    // the bitstring comparison result for each lane at O(1) cost.
-    uint8_t max_nlanes = std::max(tmp_nlanes, best_nlanes);
-    for (uint8_t i = 0; i < max_nlanes; i++)
-    {
-        // One of the two has more nonempty strings but we were equal up until here
-        if (i >= best_nlanes)
-        {
-            return (tmp_bits[i] & 1) == 0 ? -1 : 1;
-        }
-        else if (i >= tmp_nlanes)
-        {
-            return (best_bits[i] & 1) == 0 ? 1 : -1;
-        }
-        int tl = tmp_levels[i];
-        int bl = best_levels[i];
-        // We are past the considered index!
-        if (tl > pindex and bl > pindex)
-        {
-            break;
-        }
-        // One of the two has a bitstring "earlier"
-        else if ((tl <= pindex and bl > pindex) or (tl < bl))
-        {
-            return (tmp_bits[i] & 1) == 0 ? -1 : 1;
-        }
-        else if ((tl > pindex and bl <= pindex) or (tl > bl))
-        {
-            return (best_bits[i] & 1) == 0 ? 1 : -1;
-        }
-        // The two levels are equal... We have to compare strings
-        else if (a_greater[i] or (!a_less[i] and b_less[i]))
-        {
-            return 1;
-        }
-        else if (b_greater[i] or (a_less[i] and !b_less[i]))
-        {
-            return -1;
-        }
-    }
+    // --- Vectorized level + string comparison ---
+    // pindex can be negative (when priority exceeds the tree depth).
+    // uint16_t wraps -1 to 0xFFFF which would make all levels appear <= pindex.
+    // Clamp to 0 and use a flag to force all both_active lanes into both_past.
+    const bool pindex_negative = (pindex < 0);
+    simd_u16x8 pi(static_cast<uint16_t>(std::max(pindex, 0)));
 
-    // The bitstrings are entirely equal
-    return 0;
+    simd_u16x8_mask in_tmp  = LANE_INDICES < simd_u16x8(tmp_nlanes);
+    simd_u16x8_mask in_best = LANE_INDICES < simd_u16x8(best_nlanes);
+    simd_u16x8_mask both_active = in_tmp and in_best;
+
+    simd_u16x8_mask tmp_extra  = in_tmp  and !in_best;
+    simd_u16x8_mask best_extra = in_best and !in_tmp;
+
+    // When pindex < 0, every level is "past" the index, so all both_active
+    // lanes become both_past and none become tl_earlier/bl_earlier.
+    simd_u16x8_mask tl_earlier = pindex_negative
+        ? simd_u16x8_mask(false)
+        : (both_active and
+           (((tmp_levels <= pi) and (best_levels > pi)) or (tmp_levels < best_levels)));
+    simd_u16x8_mask bl_earlier = pindex_negative
+        ? simd_u16x8_mask(false)
+        : (both_active and
+           (((best_levels <= pi) and (tmp_levels > pi)) or (best_levels < tmp_levels)));
+
+    simd_u16x8_mask both_past = pindex_negative
+        ? both_active
+        : (both_active and (tmp_levels > pi) and (best_levels > pi));
+    simd_u16x8_mask levels_eq = both_active and !tl_earlier and !bl_earlier and !both_past;
+
+    simd_u16x8_mask tmp_lead1  = (tmp_bits  & simd_u16x8(1)) > simd_u16x8(0);
+    simd_u16x8_mask best_lead1 = (best_bits & simd_u16x8(1)) > simd_u16x8(0);
+
+    simd_u16x8_mask tmp_decides  = tmp_extra  or tl_earlier;
+    simd_u16x8_mask best_decides = best_extra or bl_earlier;
+
+    simd_u16x8_mask a_wins = (tmp_decides  and tmp_lead1)
+                          or (best_decides and !best_lead1)
+                          or (levels_eq and (a_greater or (!a_less and b_less)));
+
+    simd_u16x8_mask b_wins = (tmp_decides  and !tmp_lead1)
+                          or (best_decides and best_lead1)
+                          or (levels_eq and (b_greater or (a_less and !b_less)));
+
+    // find_first_set returns a large value (not -1) when no bits are set in
+    // libstdc++, so compare against 8 instead of < 0.
+    int cutoff = stdx::find_first_set(both_past);
+    simd_u16x8_mask before_cutoff = (cutoff >= 8)
+        ? simd_u16x8_mask(true)
+        : LANE_INDICES < simd_u16x8(static_cast<uint16_t>(cutoff));
+    simd_u16x8_mask deciding = (a_wins or b_wins) and before_cutoff;
+    int first = stdx::find_first_set(deciding);
+    if (first >= 8) return 0;
+    return a_wins[first] ? 1 : -1;
 }
 
 bool
