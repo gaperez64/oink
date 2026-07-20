@@ -925,6 +925,19 @@ STRPM_SIMDSolver::run()
     assert(h_max < 65535); // levels stored as uint16_t; 0xFFFF reserved for Top
     int k_max = std::min(t_max + 2, h_max);
 
+    // Representable region of the SIMD encoding. Even with the uint16
+    // unification, bitstrings are hard-capped at 8 bits (the mask/countl_one
+    // logic uses a literal 8), so t <= 7; there are 8 SIMD lanes and
+    // nlanes == k-1, so k <= 9. Beyond this the encoding would silently
+    // overflow, so we cap the (k,t) search here and hand any still-unsolved
+    // remainder to a complete solver (tangle learning) after the loop.
+    static constexpr int STRPM_SIMD_BITSTRING_BITS = 8; // bitstrings capped at 8 bits
+    static constexpr int STRPM_SIMD_LANES          = 8; // simd_u16x8 -> 8 lanes
+    const int t_repr = STRPM_SIMD_BITSTRING_BITS - 1;   // t <= 7
+    const int k_repr = STRPM_SIMD_LANES + 1;            // k <= 9  (nlanes = k-1 <= 8)
+    t_max = std::min(t_max, t_repr);
+    k_max = std::min(k_max, k_repr);
+
     // create datastructures
     Q.resize(nodecount());
     dirty.resize(nodecount());
@@ -1038,6 +1051,19 @@ STRPM_SIMDSolver::run()
                 already_tried.insert(candidate);
             }
         }
+    }
+
+    // Fallback: the (k,t) search above is capped at the representable region
+    // (k <= k_repr, t <= t_repr). If it drained without solving the whole game,
+    // hand the remaining unsolved subgame to a complete solver. All vertices
+    // strpm-simd already solved are in <disabled>, so tangle learning only
+    // finishes what is left.
+    if (game.count_unsolved() != 0)
+    {
+        logger << "strpm-simd exhausted representable parameters (k <= " << k_repr
+               << ", t <= " << t_repr << ") with " << game.count_unsolved()
+               << " vertices unsolved; falling back to tangle learning." << std::endl;
+        solveRemainderWith("tl");
     }
 
 }
