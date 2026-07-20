@@ -82,6 +82,23 @@ struct ApproxSizeCompare {
     }
 };
 
+// Count distinct values in the non-decreasing range [first, last).
+// tmp_d (the level array) is maintained non-decreasing, so a distinct-value
+// count equals 1 + (number of adjacent changes) — no hash set / allocation
+// needed. This replaces the per-call std::unordered_set constructions that
+// previously dominated prog_tmp's allocation traffic.
+static inline int
+count_distinct_nondecreasing(std::vector<int>::const_iterator first,
+                             std::vector<int>::const_iterator last)
+{
+    assert(std::is_sorted(first, last));
+    if (first == last) return 0;
+    int distinct = 1;
+    for (auto it = first + 1; it != last; ++it)
+        if (*it != *(it - 1)) ++distinct;
+    return distinct;
+}
+
 void
 STRPMSolver::to_tmp(int idx)
 {
@@ -200,7 +217,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
     }
 #endif
     // Calculate number of Non-Empty Strings (NES): count unique values in tmp_d up until there
-    int nes = std::unordered_set<int>( tmp_d.begin(), tmp_d.begin() + i + 1 ).size();
+    int nes = count_distinct_nondecreasing(tmp_d.begin(), tmp_d.begin() + i + 1);
     assert (nes >= 0);
 #ifndef NDEBUG
     if (trace >= 2) logger << nes << std::endl;
@@ -299,7 +316,7 @@ STRPMSolver::prog_tmp(int pindex, int h)
                 if (trace >= 2) logger << "Found a 0 in the beginning\n";
 #endif
                 // The 0 is either the first bit in total, or it is the first bit of that level
-                int strings_after_current = std::unordered_set<int> (tmp_d.begin() + i, tmp_d.end()).size();
+                int strings_after_current = count_distinct_nondecreasing(tmp_d.begin() + i, tmp_d.end());
                 if (strings_after_current == (h-1) - tmp_d[i])
                 {
                     // All bitstrings after the current level are non-empty, we simply move on
