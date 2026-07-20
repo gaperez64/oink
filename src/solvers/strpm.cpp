@@ -88,8 +88,8 @@ struct ApproxSizeCompare {
 // needed. This replaces the per-call std::unordered_set constructions that
 // previously dominated prog_tmp's allocation traffic.
 static inline int
-count_distinct_nondecreasing(std::vector<int>::const_iterator first,
-                             std::vector<int>::const_iterator last)
+count_distinct_nondecreasing(LevVec::const_iterator first,
+                             LevVec::const_iterator last)
 {
     assert(std::is_sorted(first, last));
     if (first == last) return 0;
@@ -162,7 +162,7 @@ STRPMSolver::trunc_tmp(int pindex)
  * Helper: skip over bits until the level changes
  */
 int 
-STRPMSolver::skipUntilNextLevel (std::vector<int>& curr_d, int i) 
+STRPMSolver::skipUntilNextLevel (LevVec& curr_d, int i)
 {
     while ((i == curr_d.size() - 1) || (i >= 0 && curr_d[i] == curr_d[i+1])) 
     {
@@ -544,7 +544,7 @@ STRPMSolver::stream_best(std::ostream &out, int h)
  * res := 1  :: tmp > other
  */
 int
-STRPMSolver::compare(int pindex, std::vector<bool>& other_b, std::vector<int>& other_d)
+STRPMSolver::compare(int pindex, BitVec& other_b, LevVec& other_d)
 {
     // cases involving Top
     if (tmp_d[0] == -1 and other_d[0] == -1) return 0;
@@ -864,13 +864,13 @@ STRPMSolver::run(int t_val, int k_val, int depth, int player)
 #endif
 
     // initialize progress measures - Every node is set to the smallest leaf in the tree
-    pm_b = std::vector<std::vector<bool>> (nodecount(), std::vector<bool>(k-1+t, 0));
-    std::vector<int> initial_d (k-1+t, 0);
+    pm_b = std::vector<BitVec> (nodecount(), BitVec(k-1+t, 0));
+    LevVec initial_d (k-1+t, 0);
     for (size_t i = t + 1; i < initial_d.size(); i++)
     {
         initial_d[i] = initial_d[i-1] + 1;
     }
-    pm_d = std::vector<std::vector<int>> (nodecount(), initial_d);
+    pm_d = std::vector<LevVec> (nodecount(), initial_d);
 
 #ifndef NDEBUG
     if (trace >= 1)
