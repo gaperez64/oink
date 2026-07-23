@@ -21,6 +21,12 @@
 #include <experimental/simd>
 #include <cstring>
 #include <cstddef>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <queue>
+#include <vector>
 
 // Architecture detection for native SIMD prefix sum
 #if defined(__SSE2__)
@@ -208,6 +214,78 @@ struct StrpmAttemptResult {
         return unsolved_before - unsolved_after;
     }
 };
+
+// One pending (k,t) attempt on an orientation's candidate heap.
+struct StrpmCandidate {
+    StrpmParams params;
+    double score = 0.0;
+    uint64_t serial = 0;
+};
+
+// Min-heap by score (lower = better); ties broken by smaller k+t, then
+// smaller k, then smaller t, then insertion order. Floating-point equality
+// is used only to detect stale heap entries superseded by a better later
+// enqueue() for the same (k,t) -- the exact score is stored on the
+// candidate and never recomputed on pop.
+struct StrpmCandidateCompare {
+    bool operator()(const StrpmCandidate& a,
+                    const StrpmCandidate& b) const noexcept {
+        if (a.score != b.score) return a.score > b.score; // min-heap
+        if (a.params.k + a.params.t != b.params.k + b.params.t)
+            return a.params.k + a.params.t >
+                   b.params.k + b.params.t;
+        if (a.params.k != b.params.k)
+            return a.params.k > b.params.k;
+        if (a.params.t != b.params.t)
+            return a.params.t > b.params.t;
+        return a.serial > b.serial;
+    }
+};
+
+// Independent (k,t) search state for one orientation (player). Two of
+// these -- one per orientation -- replace the old single global queue:
+// each has its own height, candidate heap, attempted/pending grids, and
+// pressure history (via last_result), and is only ever touched by attempts
+// run for its own player.
+struct StrpmOrientationSchedule {
+    int player = 0;
+    int h = 0;
+    int k_max = 1;
+    int t_max = 1;
+
+    uint64_t next_serial = 0;
+
+    std::priority_queue<
+        StrpmCandidate,
+        std::vector<StrpmCandidate>,
+        StrpmCandidateCompare
+    > pending;
+
+    std::array<
+        std::array<bool, STRPM_SIMD_T_MAX + 1>,
+        STRPM_SIMD_K_MAX + 1
+    > tried{};
+
+    std::array<
+        std::array<double, STRPM_SIMD_T_MAX + 1>,
+        STRPM_SIMD_K_MAX + 1
+    > best_pending_score;
+
+    StrpmAttemptResult last_result;
+
+    StrpmOrientationSchedule() {
+        for (auto& row : best_pending_score)
+            row.fill(std::numeric_limits<double>::infinity());
+    }
+};
+
+double log_binom(int n, int r);
+double log_tree_size_estimate(int k, int t, int h);
+
+bool valid(const StrpmOrientationSchedule& schedule, StrpmParams params);
+void enqueue(StrpmOrientationSchedule& schedule, StrpmParams params, double score);
+std::optional<StrpmCandidate> pop_next(StrpmOrientationSchedule& schedule);
+void expand_after_attempt(StrpmOrientationSchedule& schedule, const StrpmAttemptResult& result);
 
 class STRPM_SIMDSolver : public Solver
 {

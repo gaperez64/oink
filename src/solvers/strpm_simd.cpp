@@ -14,14 +14,10 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <cassert>
 #include <iomanip>
-#include <unordered_map>
-#include <unordered_set>
 #include <queue>
-#include <boost/functional/hash.hpp>
-#include <stack>
-#include <utility>
 
 #include "strpm_simd.hpp"
 
@@ -37,51 +33,6 @@ STRPM_SIMDSolver::STRPM_SIMDSolver(Oink& oink, Game& game) : Solver(oink, game)
 STRPM_SIMDSolver::~STRPM_SIMDSolver()
 {
 }
-
-struct RatioCompare {
-    bool operator()(const std::pair<int,int>& lhs,
-                    const std::pair<int,int>& rhs) const
-    {
-        auto lhs_ratio = std::max(lhs.first, lhs.second)/std::min(lhs.first, lhs.second);
-        auto rhs_ratio = std::max(rhs.first, rhs.second)/std::min(rhs.first, rhs.second);
-
-        return lhs_ratio > rhs_ratio;
-    }
-};
-
-constexpr inline size_t binom(size_t n, size_t k) noexcept
-{
-    return
-      (        k> n  )? 0 :          // out of range
-      (k==0 || k==n  )? 1 :          // edge
-      (k==1 || k==n-1)? n :          // first
-      (     k+k < n  )?              // recursive:
-      (binom(n-1,k-1) * n)/k :       //  path to k=1   is faster
-      (binom(n-1,k) * n)/(n-k);      //  path to k=n-1 is faster
-}
-
-struct ApproxSizeCompare {
-    int h;
-
-    double approxSize(int k, int t) const
-    {
-        if (k == 1) return 1;
-
-        double approximation = (k-1) * (std::log(static_cast<double>(h-1)/(k-1)) + 1) -
-                               (std::log(2* M_PI * (k-1))/2) - ((k-1)*(k-1))/static_cast<double>(2*(h-1));
-
-        return (k + t)*std::log(2.0) + std::log(binom(t + k - 2, k + 2)) + approximation;
-    }
-
-    bool operator()(const std::pair<int,int>& lhs,
-                    const std::pair<int,int>& rhs) const
-    {
-        auto lhs_size = approxSize(lhs.first, lhs.second);
-        auto rhs_size = approxSize(rhs.first, rhs.second);
-
-        return lhs_size > rhs_size;
-    }
-};
 
 // Classify the decisive blocking reason (if any) at the lowest candidate
 // coordinate examined by prog_tmp()'s conceptual scalar scan -- i.e. the
@@ -755,116 +706,92 @@ floor_log2 (unsigned long long x)
     return y;
 }
 
-struct Node
+double
+log_binom(int n, int r)
 {
-    int k;
-    int t;
-    int h;
-    bool isU;
-};
-
-
-// Keep track of already computed sizes, this is cached beyond single calls of
-// tree_size below
-std::unordered_map<std::tuple<int, int, int>, unsigned,
-                   boost::hash<std::tuple<int, int, int>>> treeU_simd;
-std::unordered_map<std::tuple<int, int, int>, unsigned,
-                   boost::hash<std::tuple<int, int, int>>> treeV_simd;
-
-unsigned tree_size_simd(int k, int t, int h)
-{
-    std::stack<Node> stack;
-
-    stack.push ({k, t, h, true});
-    while (!stack.empty())
-    {
-        Node& tos = stack.top();
-        if (tos.isU and tos.h == 1 and tos.k == 1)
-        {
-            treeU_simd[std::make_tuple(tos.k, tos.t, tos.h)] = 1;
-            stack.pop ();
-        }
-        else if (tos.isU and tos.h > 1 and tos.k == 1)
-        {
-            auto son = treeU_simd.find(std::make_tuple(tos.k, tos.t, tos.h - 1));
-            if (son != treeU_simd.end())
-            {
-                treeU_simd[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                stack.pop ();
-            }
-            else stack.push ({tos.k, tos.t, tos.h - 1, true});
-        }
-        else if (tos.h >= tos.k and tos.k >= 2 and tos.t == 0)
-        {
-            auto son = treeU_simd.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
-            if (son != treeU_simd.end())
-            {
-                if (tos.isU) treeU_simd[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                else treeV_simd[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                stack.pop ();
-            }
-            else stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
-        }
-        else if (!tos.isU and tos.h >= tos.k and tos.k >= 2 and tos.t >= 1)
-        {
-            auto son1 = treeV_simd.find(std::make_tuple(tos.k, tos.t - 1, tos. h));
-            auto son2 = treeU_simd.find(std::make_tuple(tos.k - 1, tos.t, tos.h - 1));
-            if (son1 != treeV_simd.end() and son2 != treeU_simd.end())
-            {
-                treeV_simd[std::make_tuple(tos.k, tos.t, tos.h)] = son1->second * 2 + son2->second;
-                stack.pop ();
-            }
-            else
-            {
-                stack.push ({tos.k - 1, tos.t, tos.h - 1, true});
-                stack.push ({tos.k, tos.t - 1, tos.h, false});
-            }
-        }
-        else if (tos.isU and tos.h == tos.k and tos.k >= 2)
-        {
-            auto son = treeV_simd.find(std::make_tuple(tos.k, tos.t, tos.h));
-            if (son != treeV_simd.end())
-            {
-                treeU_simd[std::make_tuple(tos.k, tos.t, tos.h)] = son->second;
-                stack.pop ();
-            }
-            else stack.push ({tos.k, tos.t, tos.h, false});
-        }
-        else if (tos.isU and tos.h > tos.k and tos.k >= 2)
-        {
-            auto son1 = treeV_simd.find(std::make_tuple(tos.k, tos.t, tos.h));
-            auto son2 = treeU_simd.find(std::make_tuple(tos.k, tos.t, tos.h - 1));
-            if (son1 != treeV_simd.end() and son2 != treeU_simd.end())
-            {
-                treeU_simd[std::make_tuple(tos.k, tos.t, tos.h)] = son1->second * 2 + son2->second;
-                stack.pop ();
-            }
-            else
-            {
-                stack.push ({tos.k, tos.t, tos.h - 1, true});
-                stack.push ({tos.k, tos.t, tos.h, false});
-            }
-        }
-        else assert(false); // We should never get here
-    }
-
-    return treeU_simd[std::make_tuple(k, t, h)];
+    if (r < 0 || r > n) return std::numeric_limits<double>::infinity();
+    return std::lgamma(static_cast<double>(n) + 1.0)
+         - std::lgamma(static_cast<double>(r) + 1.0)
+         - std::lgamma(static_cast<double>(n - r) + 1.0);
 }
 
-struct SizeCompare
+// Robust log-space size estimate for the Strahler-universal tree:
+//   2^(k+t) * binom(t+k-2,k-2) * binom(h-1,k-1)
+// Used (neutrally, without pressure weighting) as the base candidate score;
+// lower is "smaller tree, cheaper to try". Deliberately does not reuse the
+// old constexpr binom()/ApproxSizeCompare -- both had overflow/small-parameter
+// issues on this exact formula.
+double
+log_tree_size_estimate(int k, int t, int h)
 {
-    int h;
+    if (k <= 1) return 0.0;
 
-    bool operator()(const std::pair<int,int>& lhs,
-                    const std::pair<int,int>& rhs) const
-    {
-        auto lhs_size = tree_size_simd(lhs.first, lhs.second, h);
-        auto rhs_size = tree_size_simd(rhs.first, rhs.second, h);
+    return static_cast<double>(k + t) * std::log(2.0)
+         + log_binom(t + k - 2, k - 2)
+         + log_binom(h - 1, k - 1);
+}
 
-        return lhs_size > rhs_size;
+// Is (k,t) inside this schedule's representable/height-bounded grid?
+bool
+valid(const StrpmOrientationSchedule& schedule, StrpmParams params)
+{
+    return params.k >= 1 and params.k <= schedule.k_max
+       and params.t >= 1 and params.t <= schedule.t_max;
+}
+
+// Lazy decrease-key insertion: skip already-tried pairs and non-improving
+// scores, otherwise record the new best score for (k,t) and push a fresh
+// heap entry (stale entries for the same cell are discarded lazily on pop).
+void
+enqueue(StrpmOrientationSchedule& schedule, StrpmParams params, double score)
+{
+    if (!valid(schedule, params)) return;
+    if (schedule.tried[params.k][params.t]) return;
+    if (score >= schedule.best_pending_score[params.k][params.t]) return;
+
+    schedule.best_pending_score[params.k][params.t] = score;
+    schedule.pending.push(StrpmCandidate{params, score, schedule.next_serial++});
+}
+
+// Pop the best still-live candidate, discarding stale heap entries whose
+// score no longer matches the grid's recorded best for that cell (i.e. a
+// later, better enqueue() superseded them) or that were already attempted.
+std::optional<StrpmCandidate>
+pop_next(StrpmOrientationSchedule& schedule)
+{
+    while (!schedule.pending.empty()) {
+        StrpmCandidate candidate = schedule.pending.top();
+        schedule.pending.pop();
+
+        const auto& [k, t] = candidate.params;
+        if (schedule.tried[k][t]) continue;
+        if (candidate.score != schedule.best_pending_score[k][t]) continue;
+
+        schedule.tried[k][t] = true;
+        return candidate;
     }
-};
+    return std::nullopt;
+}
 
+// After an attempt at (k,t), enqueue both legal neighbors (k+1,t) and
+// (k,t+1) using the neutral (non-pressure-weighted) tree-size estimate.
+// Both neighbors are always offered when in bounds -- pressure only
+// reorders the heap in a later revision, it never prunes a direction.
+void
+expand_after_attempt(StrpmOrientationSchedule& schedule, const StrpmAttemptResult& result)
+{
+    const int k = result.params.k;
+    const int t = result.params.t;
+
+    const double score_k = log_tree_size_estimate(k + 1, t, schedule.h);
+    const double score_t = log_tree_size_estimate(k, t + 1, schedule.h);
+
+    if (k + 1 <= schedule.k_max)
+        enqueue(schedule, {k + 1, t}, score_k);
+
+    if (t + 1 <= schedule.t_max)
+        enqueue(schedule, {k, t + 1}, score_t);
+}
 
 StrpmAttemptResult
 STRPM_SIMDSolver::run_attempt(int t_val, int k_val, int depth, int player)
@@ -1011,52 +938,45 @@ STRPM_SIMDSolver::run()
 {
     int max_prio = priority(nodecount()-1);
 
-    // compute ml (max l) and the h for even/odd
-    int t_max = floor_log2(nodecount());
+    // compute the h for even/odd
     int h0 = (max_prio/2)+1;
     int h1 = (max_prio+1)/2;
 
-    int h_max = std::max(h0, h1);
-    assert(h_max < 65535); // levels stored as uint16_t; 0xFFFF reserved for Top
-    int k_max = std::min(t_max + 2, h_max);
-
-    // Representable region of the SIMD encoding. Even with the uint16
-    // unification, bitstrings are hard-capped at 8 bits (the mask/countl_one
-    // logic uses a literal 8), so t <= STRPM_SIMD_T_MAX; there are 8 SIMD
-    // lanes and nlanes == k-1, so k <= STRPM_SIMD_K_MAX. Beyond this the
-    // encoding would silently overflow, so we cap the (k,t) search here and
-    // hand any still-unsolved remainder to a complete solver (tangle
-    // learning) after the loop.
-    t_max = std::min(t_max, STRPM_SIMD_T_MAX);
-    k_max = std::min(k_max, STRPM_SIMD_K_MAX);
+    assert(std::max(h0, h1) < 65535); // levels stored as uint16_t; 0xFFFF reserved for Top
 
     // create datastructures
     Q.resize(nodecount());
     dirty.resize(nodecount());
     succs.reserve(nodecount());
 
-    // Create a priority queue for (k, t) pairs and push init with (1, 1)
-    std::priority_queue<
-        std::pair<int,int>,
-        std::vector<std::pair<int,int>>,
-        RatioCompare
-        //ApproxSizeCompare
-    > pq { };
-    pq.push({1, 1});
-    /*
-    To use SizeCompare:
-    std::priority_queue<
-        std::pair<int,int>,
-        std::vector<std::pair<int,int>>,
-        SizeCompare
-    > pq { SizeCompare { h_max } };
-    */
+    // Two independent per-orientation schedules replace the old single
+    // global (k,t) queue: each has its own height, candidate heap,
+    // attempted/pending grids, and pressure history (via last_result), and
+    // a run for player p only ever touches schedules[p].
+    std::array<StrpmOrientationSchedule, 2> schedules;
+    schedules[0].player = 0;
+    schedules[0].h = h0 + 1; // the exact h run_attempt(..., h0, ...) uses (depth+1)
+    schedules[1].player = 1;
+    schedules[1].h = h1 + 1;
 
-    // Keep track of already tried combinations
-    std::unordered_set<std::pair<int, int>, boost::hash<std::pair<int, int>>> already_tried;
+    for (auto& schedule : schedules) {
+        // Representable region of the SIMD encoding. Even with the uint16
+        // unification, bitstrings are hard-capped at 8 bits (the mask/countl_one
+        // logic uses a literal 8), so t <= STRPM_SIMD_T_MAX; there are 8 SIMD
+        // lanes and nlanes == k-1, so k <= STRPM_SIMD_K_MAX. Beyond this the
+        // encoding would silently overflow, so we cap the (k,t) search here
+        // (per orientation, bounded by that orientation's own height) and
+        // hand any still-unsolved remainder to a complete solver (tangle
+        // learning) after the loop.
+        schedule.t_max = std::min(floor_log2(nodecount()), STRPM_SIMD_T_MAX);
+        schedule.k_max = std::min({schedule.t_max + 2, schedule.h, STRPM_SIMD_K_MAX});
+        // Same starting pair the old global schedule used.
+        enqueue(schedule, {1, 1}, log_tree_size_estimate(1, 1, schedule.h));
+    }
 
 #ifndef NDEBUG
-    logger << "Max t: " << t_max << ", max k: " << k_max << std::endl;
+    logger << "player 0: max t: " << schedules[0].t_max << ", max k: " << schedules[0].k_max << std::endl;
+    logger << "player 1: max t: " << schedules[1].t_max << ", max k: " << schedules[1].k_max << std::endl;
 #endif
 
 #if ALWAYS_RESET
@@ -1064,104 +984,73 @@ STRPM_SIMDSolver::run()
     bitset initial_solved { game.getSolved() };
 #endif
 
-    while (!pq.empty()) {
-        // Step 1: Get values
-        auto [k_val, t_val] = pq.top();
-        pq.pop();
+    // Fair round-robin dispatcher: each round performs at most one attempt
+    // per orientation, so neither orientation can starve the other by
+    // generating an endless chain of favored candidates. The schedules
+    // remain valid as the other orientation solves vertices, since the
+    // residual game only shrinks.
+    const std::array<int, 2> order =
+        ODDFIRST ? std::array<int,2>{1,0}
+                 : std::array<int,2>{0,1};
 
-        // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
-        // (lift_count/lift_attempt are reset inside run_attempt() at entry)
-        uint64_t c;
+    while (game.count_unsolved() != 0) {
+        bool ran_any_attempt = false;
+
+        for (int player : order) {
+            auto& schedule = schedules[player];
+            const auto candidate = pop_next(schedule);
+            if (!candidate) continue;
+
+            ran_any_attempt = true;
 
 #if ALWAYS_RESET
-        game.reset_to_initial(initial_solved);
-        reset_to_initial(initial_disabled);
+            game.reset_to_initial(initial_solved);
+            reset_to_initial(initial_disabled);
 #endif
 
+            const auto result = run_attempt(
+                candidate->params.t,
+                candidate->params.k,
+                player == 0 ? h0 : h1,
+                player);
+
 #ifndef NDEBUG
-        logger << "Currently unsolved: " << game.count_unsolved() << std::endl;
+            logger << "after player " << player << " (k=" << candidate->params.k << ", t=" << candidate->params.t
+                   << "), " << std::setw(9) << result.lifts << " lifts, " << std::setw(9) << result.lift_attempts
+                   << " lift attempts, " << result.unsolved_after << " unsolved left." << std::endl;
 #endif
 
-        // Step 3: Actually do the solving
-        if (ODDFIRST) {
-            // run odd counters
-            StrpmAttemptResult odd_result = run_attempt(t_val, k_val, h1, 1);
-            (void)odd_result;
-            c = game.count_unsolved();
-#ifndef NDEBUG
-            logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
-            // if now solved, no need to run odd counters
-            if (c != 0)
-            {
-                // run even counters
-                StrpmAttemptResult even_result = run_attempt(t_val, k_val, h0, 0);
-                (void)even_result;
-                c = game.count_unsolved();
-#ifndef NDEBUG
-                logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
-            }
+            schedule.last_result = result;
+            expand_after_attempt(schedule, result);
 
-        } else {
-            // run even counters
-            StrpmAttemptResult even_result = run_attempt(t_val, k_val, h0, 0);
-            (void)even_result;
-            c = game.count_unsolved();
-#ifndef NDEBUG
-            logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
-            // if now solved, no need to run odd counters
-            if (c != 0)
-            {
-                // run odd counters
-                StrpmAttemptResult odd_result = run_attempt(t_val, k_val, h1, 1);
-                (void)odd_result;
-                c = game.count_unsolved();
-#ifndef NDEBUG
-                logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
-#endif
+            if (game.count_unsolved() == 0) {
+                logger << "Solved with k = " << candidate->params.k << ", t = " << candidate->params.t << std::endl;
+                break;
             }
         }
 
-        // Step 4: Check whether we solved the game
-        if (c == 0)
-        {
-            // We can stop, everything is solved!
-            logger << "Solved with k = " << k_val << ", t = " << t_val << std::endl;
+        if (!ran_any_attempt)
             break;
-        }
-        else if (k_val < k_max or t_val < t_max)
-        {
-            std::pair<int, int> candidate {k_val + 1, t_val};
-            if (k_val + 1 <= k_max and already_tried.find(candidate) == already_tried.end())
-            {
-                pq.push(candidate);
-                already_tried.insert(candidate);
-            }
-
-            candidate = { k_val, t_val + 1 };
-            if (t_val + 1 <= t_max and already_tried.find(candidate) == already_tried.end())
-            {
-                pq.push(candidate);
-                already_tried.insert(candidate);
-            }
-        }
     }
 
-    // Fallback: the (k,t) search above is capped at the representable region
-    // (k <= STRPM_SIMD_K_MAX, t <= STRPM_SIMD_T_MAX). If it drained without
-    // solving the whole game, hand the remaining unsolved subgame to a
-    // complete solver. All vertices strpm-simd already solved are in
-    // <disabled>, so tangle learning only finishes what is left.
+    // Fallback: each schedule's (k,t) search is capped at the representable
+    // region (k <= STRPM_SIMD_K_MAX, t <= STRPM_SIMD_T_MAX) and its own
+    // height-bounded k_max/t_max. If both schedules drained without solving
+    // the whole game, hand the remaining unsolved subgame to a complete
+    // solver. All vertices strpm-simd already solved are in <disabled>, so
+    // tangle learning only finishes what is left.
     if (game.count_unsolved() != 0)
     {
-        logger << "strpm-simd exhausted representable parameters (k <= " << STRPM_SIMD_K_MAX
-               << ", t <= " << STRPM_SIMD_T_MAX << ") with " << game.count_unsolved()
+        for (int player = 0; player < 2; player++) {
+            const auto& schedule = schedules[player];
+            logger << "strpm-simd exhausted player " << player << " schedule up to k = "
+                   << schedule.last_result.params.k << ", t = " << schedule.last_result.params.t
+                   << " (bounds k <= " << schedule.k_max << ", t <= " << schedule.t_max << ")" << std::endl;
+        }
+        logger << game.count_unsolved()
                << " vertices unsolved; falling back to tangle learning." << std::endl;
         solveRemainderWith("tl");
     }
-
 }
 
 }
