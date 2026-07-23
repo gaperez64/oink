@@ -282,6 +282,16 @@ struct StrpmOrientationSchedule {
 double log_binom(int n, int r);
 double log_tree_size_estimate(int k, int t, int h);
 
+// Laplace-smoothed probability that growing k (resp. t) addresses the
+// observed blocking pressure: no evidence gives 1/2 each; C1 pushes
+// p_increase_k up, C2/C3/C4 push p_increase_t up; neither is ever zero.
+struct StrpmDirectionProbabilities {
+    double p_increase_k;
+    double p_increase_t;
+};
+
+StrpmDirectionProbabilities direction_probabilities(const StrpmPressureStats& pressure);
+
 bool valid(const StrpmOrientationSchedule& schedule, StrpmParams params);
 void enqueue(StrpmOrientationSchedule& schedule, StrpmParams params, double score);
 std::optional<StrpmCandidate> pop_next(StrpmOrientationSchedule& schedule);

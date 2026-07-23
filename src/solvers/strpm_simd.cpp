@@ -773,18 +773,36 @@ pop_next(StrpmOrientationSchedule& schedule)
     return std::nullopt;
 }
 
+StrpmDirectionProbabilities
+direction_probabilities(const StrpmPressureStats& pressure)
+{
+    const double k_evidence = static_cast<double>(pressure.k_pressure());
+    const double t_evidence = static_cast<double>(pressure.t_pressure());
+    const double denominator = k_evidence + t_evidence + 2.0;
+
+    return StrpmDirectionProbabilities{
+        (k_evidence + 1.0) / denominator,
+        (t_evidence + 1.0) / denominator
+    };
+}
+
 // After an attempt at (k,t), enqueue both legal neighbors (k+1,t) and
-// (k,t+1) using the neutral (non-pressure-weighted) tree-size estimate.
-// Both neighbors are always offered when in bounds -- pressure only
-// reorders the heap in a later revision, it never prunes a direction.
+// (k,t+1). Score = estimated log tree size - log(probability that this
+// direction addresses the observed blocking pressure); lower is better.
+// With no decisive blocks both probabilities are exactly 1/2, so the score
+// falls back to the plain tree-size estimate. Both neighbors are always
+// offered when in bounds -- pressure only reorders the heap, it never
+// prunes a legal direction.
 void
 expand_after_attempt(StrpmOrientationSchedule& schedule, const StrpmAttemptResult& result)
 {
     const int k = result.params.k;
     const int t = result.params.t;
 
-    const double score_k = log_tree_size_estimate(k + 1, t, schedule.h);
-    const double score_t = log_tree_size_estimate(k, t + 1, schedule.h);
+    const StrpmDirectionProbabilities probs = direction_probabilities(result.pressure);
+
+    const double score_k = log_tree_size_estimate(k + 1, t, schedule.h) - std::log(probs.p_increase_k);
+    const double score_t = log_tree_size_estimate(k, t + 1, schedule.h) - std::log(probs.p_increase_t);
 
     if (k + 1 <= schedule.k_max)
         enqueue(schedule, {k + 1, t}, score_k);
@@ -1014,14 +1032,39 @@ STRPM_SIMDSolver::run()
                 player == 0 ? h0 : h1,
                 player);
 
-#ifndef NDEBUG
-            logger << "after player " << player << " (k=" << candidate->params.k << ", t=" << candidate->params.t
-                   << "), " << std::setw(9) << result.lifts << " lifts, " << std::setw(9) << result.lift_attempts
-                   << " lift attempts, " << result.unsolved_after << " unsolved left." << std::endl;
-#endif
-
             schedule.last_result = result;
             expand_after_attempt(schedule, result);
+
+#ifndef NDEBUG
+            // One compact summary line per orientation attempt; never
+            // per-call prog_tmp() pressure detail (that would be too hot).
+            if (trace >= 1) {
+                const int k = candidate->params.k;
+                const int t = candidate->params.t;
+                logger << "strpm-simd p=" << player << " k=" << k << " t=" << t
+                       << " h=" << result.h << std::endl;
+                logger << "  solved=" << result.solved_vertices()
+                       << " remaining=" << result.unsolved_after << std::endl;
+                logger << "  lifts=" << result.lifts << " attempts=" << result.lift_attempts << std::endl;
+                logger << "  pressure={c1:" << result.pressure.c1_no_string_slot
+                       << ",c2:" << result.pressure.c2_no_bit_budget
+                       << ",c3:" << result.pressure.c3_zero_ones_boundary
+                       << ",c4:" << result.pressure.c4_ones_boundary
+                       << ",top:" << result.pressure.overflow_to_top << "}" << std::endl;
+
+                const StrpmDirectionProbabilities probs = direction_probabilities(result.pressure);
+                if (k + 1 <= schedule.k_max) {
+                    logger << "  enqueue k+1 score="
+                           << (log_tree_size_estimate(k + 1, t, schedule.h) - std::log(probs.p_increase_k))
+                           << std::endl;
+                }
+                if (t + 1 <= schedule.t_max) {
+                    logger << "  enqueue t+1 score="
+                           << (log_tree_size_estimate(k, t + 1, schedule.h) - std::log(probs.p_increase_t))
+                           << std::endl;
+                }
+            }
+#endif
 
             if (game.count_unsolved() == 0) {
                 logger << "Solved with k = " << candidate->params.k << ", t = " << candidate->params.t << std::endl;
