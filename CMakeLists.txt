@@ -152,6 +152,22 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
         #add_executable(test_measures)
         #target_sources(test_measures PRIVATE test/test_measures.cpp)
         #set_target_props(test_measures)
+
+        # Pure-function tests for the strpm-simd scheduler. Unlike
+        # test_solvers (which only links the prebuilt oink library), this
+        # includes solvers/strpm_simd.hpp directly, which pulls in
+        # <experimental/simd> -- set_target_props() alone does not give it
+        # the same -march flag the oink target itself uses (PRIVATE compile
+        # options on a static library don't propagate to consumers), so it
+        # is added explicitly here, mirroring the oink/solve setup above.
+        add_executable(test_strpm_scheduler)
+        target_sources(test_strpm_scheduler PRIVATE test/test_strpm_scheduler.cpp)
+        set_target_props(test_strpm_scheduler)
+        if(APPLE)
+            target_compile_options(test_strpm_scheduler PRIVATE -march=armv8.7-a)
+        else()
+            target_compile_options(test_strpm_scheduler PRIVATE -march=native)
+        endif()
     endif()
 
     if(OINK_BUILD_EXTRA_TOOLS)
@@ -220,6 +236,7 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
         # test progress measures and variations
         add_test(NAME TestSolverSPM COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --spm)
         add_test(NAME TestSolverTSPM COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --tspm)
+        add_test(NAME TestSolverSTRPMSIMD COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --strpm-simd)
         # THERE IS A BUG IN MSPM -- disable test for now, but it needs to be solved
         #  add_test(NAME TestSolverMSPM COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --mspm)
         add_test(NAME TestSolverSSPM COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --sspm)
@@ -255,6 +272,13 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
         add_test(NAME TestSolverZLKPP2 COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --zlkpp-waw)
         add_test(NAME TestSolverZLKPP3 COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --zlkpp-liv)
         #add_test(NAME TestSolver COMMAND test_solvers ${CMAKE_CURRENT_SOURCE_DIR}/tests --)
+        # strpm-simd scheduler pure-function tests (no game/solver involved)
+        add_test(NAME TestStrpmScheduler COMMAND test_strpm_scheduler)
+        # strpm-simd scheduling-diagnostics tests: four tiny games that each
+        # exercise one blocking-pressure category (C1 / C2 / C3-or-C4 / none)
+        add_test(NAME TestStrpmPressureDiagnostics
+                 COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test/test_strpm_pressure.sh
+                         $<TARGET_FILE:solve> ${CMAKE_CURRENT_SOURCE_DIR}/tests/strpm_pressure)
     endif()
 endif()
 
