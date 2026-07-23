@@ -792,7 +792,16 @@ direction_probabilities(const StrpmPressureStats& pressure)
 // With no decisive blocks both probabilities are exactly 1/2, so the score
 // falls back to the plain tree-size estimate. Both neighbors are always
 // offered when in bounds -- pressure only reorders the heap, it never
-// prunes a legal direction.
+// prunes a legal direction -- with one deliberate exception: at k<=1,
+// prog_tmp()'s k==1 fast path ignores t entirely (every measure is either
+// the initial empty value or Top, regardless of t), so (1,t) and (1,t+1)
+// are provably the same attempt. Offering (1,t+1) there isn't "a legal
+// neighbor that might help" per the C1-C4 pressure model above t is not a
+// real search dimension yet at k=1 -- it's a guaranteed no-op re-attempt,
+// and log_tree_size_estimate(1,*,h) == 0 for every t makes the scheduler
+// prefer exhausting all of t before ever trying k=2, wasting up to
+// STRPM_SIMD_T_MAX-1 attempts per orientation. So growing t is only
+// offered once k > 1.
 void
 expand_after_attempt(StrpmOrientationSchedule& schedule, const StrpmAttemptResult& result)
 {
@@ -807,7 +816,7 @@ expand_after_attempt(StrpmOrientationSchedule& schedule, const StrpmAttemptResul
     if (k + 1 <= schedule.k_max)
         enqueue(schedule, {k + 1, t}, score_k);
 
-    if (t + 1 <= schedule.t_max)
+    if (t + 1 <= schedule.t_max and k > 1)
         enqueue(schedule, {k, t + 1}, score_t);
 }
 
