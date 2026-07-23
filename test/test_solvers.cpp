@@ -29,7 +29,7 @@
 #include <boost/iostreams/filter/gzip.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/random/random_device.hpp>
-#include <boost/process.hpp>
+#include <boost/process/v1.hpp>
 
 
 #include "tools/cxxopts.hpp"
@@ -43,7 +43,7 @@
 using namespace pg;
 namespace fs = boost::filesystem;
 namespace io = boost::iostreams;
-namespace bp = boost::process;
+namespace bp = boost::process::v1;
 
 bool opt_inflate = false;
 bool opt_compress = false;
