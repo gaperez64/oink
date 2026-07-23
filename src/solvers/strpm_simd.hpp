@@ -128,6 +128,87 @@ static_assert(offsetof(NodePM, nlanes) == 48);
 
 namespace pg {
 
+// Representable region of the SIMD encoding: bitstrings are capped at 8 bits
+// (t <= STRPM_SIMD_T_MAX) and there are 8 SIMD lanes, so nlanes == k-1 <= 8
+// (k <= STRPM_SIMD_K_MAX). Single source of truth for both the (k,t) search
+// bounds in STRPM_SIMDSolver::run() and the fixed-size scheduler grids below.
+static constexpr int STRPM_SIMD_BITSTRING_BITS = 8;
+static constexpr int STRPM_SIMD_LANES          = 8;
+static constexpr int STRPM_SIMD_T_MAX = STRPM_SIMD_BITSTRING_BITS - 1; // 7
+static constexpr int STRPM_SIMD_K_MAX = STRPM_SIMD_LANES + 1;          // 9
+
+// A (k,t) parameter pair for the Strahler-tree progress measure search.
+struct StrpmParams {
+    int k;
+    int t;
+};
+
+inline bool operator==(const StrpmParams& a, const StrpmParams& b) noexcept {
+    return a.k == b.k && a.t == b.t;
+}
+
+// The four mathematical reasons the lowest candidate coordinate in a
+// progress-measure update can fail to have a successor (see prog_tmp()):
+//   C1: no nonempty-string slot remains        -> k pressure
+//   C2: all non-leading-bit budget used above  -> t pressure
+//   C3: 01^j boundary at full bit budget       -> t pressure
+//   C4: 1^j boundary at full bit budget        -> t pressure
+enum class StrpmBlockReason : uint8_t {
+    none = 0,
+    no_string_slot,
+    no_bit_budget,
+    zero_ones_boundary,
+    ones_boundary
+};
+
+// Per-orientation-attempt telemetry on why prog_tmp() ran out of room for
+// the lowest candidate coordinate, gathered purely to steer scheduling
+// heuristics -- never used to prune a legal (k,t) neighbor.
+struct StrpmPressureStats {
+    uint64_t prog_calls = 0;
+
+    uint64_t c1_no_string_slot = 0;
+    uint64_t c2_no_bit_budget = 0;
+    uint64_t c3_zero_ones_boundary = 0;
+    uint64_t c4_ones_boundary = 0;
+
+    uint64_t overflow_to_top = 0;
+    uint64_t carry_without_overflow = 0;
+
+    uint64_t k_pressure() const noexcept {
+        return c1_no_string_slot;
+    }
+
+    uint64_t t_pressure() const noexcept {
+        return c2_no_bit_budget
+             + c3_zero_ones_boundary
+             + c4_ones_boundary;
+    }
+
+    uint64_t decisive_blocks() const noexcept {
+        return k_pressure() + t_pressure();
+    }
+};
+
+// Result of one run_attempt() call: one orientation, one (k,t) pair.
+struct StrpmAttemptResult {
+    int player = 0;
+    StrpmParams params{1, 1};
+    int h = 0;
+
+    uint64_t unsolved_before = 0;
+    uint64_t unsolved_after = 0;
+
+    uint64_t lifts = 0;
+    uint64_t lift_attempts = 0;
+
+    StrpmPressureStats pressure;
+
+    uint64_t solved_vertices() const noexcept {
+        return unsolved_before - unsolved_after;
+    }
+};
+
 class STRPM_SIMDSolver : public Solver
 {
 public:
@@ -250,7 +331,14 @@ protected:
     int lift_count = 0;
     int lift_attempt = 0;
 
-    void run(int t_val, int k_val, int depth, int player);
+    // Non-owning pointer to the current attempt's pressure stats, set for
+    // the duration of the initial lifting fixed point in run_attempt() and
+    // cleared before strategy extraction re-lifts (which must not pollute
+    // scheduling telemetry). The solver is single-threaded at this level,
+    // so a raw pointer (not atomics) is sufficient.
+    StrpmPressureStats* active_pressure_stats = nullptr;
+
+    StrpmAttemptResult run_attempt(int t_val, int k_val, int depth, int player);
 };
 
 }

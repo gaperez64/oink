@@ -83,6 +83,36 @@ struct ApproxSizeCompare {
     }
 };
 
+// Classify the decisive blocking reason (if any) at the lowest candidate
+// coordinate examined by prog_tmp()'s conceptual scalar scan -- i.e. the
+// implicit empty coordinate (C1, no SIMD lane) if lowest_is_c1, otherwise
+// the deepest explicit lane at or above pindex (lowest_explicit, found via
+// find_last_set on smaller_than_p). At most one reason is recorded per
+// call; this never alters the masks or the successor result, it is purely
+// an observational side channel for scheduling heuristics.
+static inline void
+record_decisive_block(
+    StrpmPressureStats& stats,
+    bool lowest_is_c1,
+    int lowest_explicit,
+    const simd_u16x8_mask& c2,
+    const simd_u16x8_mask& c3,
+    const simd_u16x8_mask& c4)
+{
+    if (lowest_is_c1) {
+        ++stats.c1_no_string_slot;
+        return;
+    }
+    if (lowest_explicit < 0) return;
+    if (c2[lowest_explicit]) {
+        ++stats.c2_no_bit_budget;
+    } else if (c3[lowest_explicit]) {
+        ++stats.c3_zero_ones_boundary;
+    } else if (c4[lowest_explicit]) {
+        ++stats.c4_ones_boundary;
+    }
+}
+
 /**
  * Set tmp := min { m | m >_p tmp }
  */
@@ -91,6 +121,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
 {
     if (k == 1 and tmp_nlanes == 0)
     {
+        if (active_pressure_stats) ++active_pressure_stats->prog_calls;
         // We can immediately handle k = 1, it's just one branch and top
         tmp_levels[0] = TOP_SENTINEL;
         tmp_nlanes = 1;
@@ -102,6 +133,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
 
     // Simple case 1: Top >_p Top
     if (tmp_levels[0] == TOP_SENTINEL) return; // already Top
+    if (active_pressure_stats) ++active_pressure_stats->prog_calls;
 
     // NOTE: k=2,t=1 specialization was removed because the assumption that
     // Case A always does a full reset is incorrect: for bit patterns "00" and
@@ -146,6 +178,31 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     //   all NLB positions are 1 (i.e., the string is 01^j).
     simd_u16x8 clear_first_bit(static_cast<uint16_t>(0xFFFE));
     simd_u16x8 pattern_zero_and_ones = tmp_masks & clear_first_bit;
+    simd_u16x8 t16(static_cast<uint16_t>(t));
+
+    // Named, mutually exclusive blocking-reason masks -- C2/C3/C4 from the
+    // handoff (C1 has no SIMD lane, see lowest_is_c1 below). Their union is
+    // exactly the original monolithic no_successor formula: with A = "nlb_before
+    // == t16", B = "nlb_counts == t16", C = "01^j boundary", D = "1^j boundary",
+    // "A or (B and (C or D))" == "A or (!A and B and (C or D))" (X or (!X and Z)
+    // == X or Z), and expanding !A-and-B-and-(C-or-D) into the two disjuncts
+    // below (with C taking precedence over D) reproduces that exact union.
+    const simd_u16x8_mask c2_mask =
+        has_bits and (nlb_before == t16);
+
+    const simd_u16x8_mask c3_mask =
+        has_bits
+        and !c2_mask
+        and (nlb_counts == t16)
+        and (tmp_bits == pattern_zero_and_ones)
+        and afa_mask;
+
+    const simd_u16x8_mask c4_mask =
+        has_bits
+        and !c2_mask
+        and !c3_mask
+        and (nlb_counts == t16)
+        and (tmp_bits == tmp_masks);
 
     // A lane has no successor when:
     //   1) nlb_before == t: all t NLB slots are already used in earlier lanes, OR
@@ -153,14 +210,27 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
     //      a) bits == 01^j pattern AND all levels after this are filled (can't reset
     //         downward because there's nowhere to put new strings), OR
     //      b) bits == mask, i.e. all positions are 1 (string is 1^j, maximum value)
-    simd_u16x8 t16(static_cast<uint16_t>(t));
-    simd_u16x8_mask no_successor = has_bits and ((nlb_before == t16) or ((nlb_counts == t16) and (
-             ((tmp_bits == pattern_zero_and_ones) and afa_mask)
-          or (tmp_bits == tmp_masks)))
-    );
+    simd_u16x8_mask no_successor = c2_mask or c3_mask or c4_mask;
 
     // A lane has a successor if it's before pindex, non-empty, and not stuck.
     simd_u16x8_mask has_successor = smaller_than_p and has_bits and !no_successor;
+
+    // --- Pressure telemetry: classify the lowest candidate coordinate ---
+    // C1 has no SIMD lane (empty labels aren't stored): if all k-1 nonempty
+    // labels already occur above the empty level pindex, that implicit empty
+    // coordinate is blocked by C1. Otherwise classify the deepest explicit
+    // lane at or above pindex via the masks above. Heuristic-only; does not
+    // affect no_successor/has_successor or the successor computation below.
+    if (active_pressure_stats) {
+        bool lowest_is_c1 = false;
+        if (tmp_nlanes == static_cast<uint8_t>(k - 1)) {
+            const int last_level = static_cast<int>(tmp_levels[tmp_nlanes - 1]);
+            lowest_is_c1 = last_level < pindex;
+        }
+        const int lowest_explicit = lowest_is_c1 ? -1 : stdx::find_last_set(smaller_than_p);
+        record_decisive_block(*active_pressure_stats, lowest_is_c1, lowest_explicit,
+                               c2_mask, c3_mask, c4_mask);
+    }
 
     // --- Find the rightmost (highest-index) lane that can be incremented ---
     // We search from the right so that the resulting measure is the smallest
@@ -172,6 +242,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         if (tmp_levels[0] == 0)
         {
             // Already at the maximum for this level structure => overflow to Top
+            if (active_pressure_stats) ++active_pressure_stats->overflow_to_top;
             tmp_nlanes = 1;
             tmp_levels[0] = TOP_SENTINEL;
             fill_inactive_tmp();
@@ -181,6 +252,7 @@ STRPM_SIMDSolver::prog_tmp(int pindex, int h)
         {
             // Shift the first string to an earlier level and reset its bits to "1"
             // (the smallest non-empty bitstring with leading bit 1).
+            if (active_pressure_stats) ++active_pressure_stats->carry_without_overflow;
             tmp_bits[0] = 1;
             match = 0;
             tmp_levels[0] = static_cast<uint16_t>(std::min(static_cast<int>(tmp_levels[0]) - 1, pindex)); // min needs int for signedness
@@ -794,14 +866,23 @@ struct SizeCompare
 };
 
 
-void
-STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
+StrpmAttemptResult
+STRPM_SIMDSolver::run_attempt(int t_val, int k_val, int depth, int player)
 {
+    StrpmAttemptResult result;
+    result.player = player;
+    result.params = {k_val, t_val};
+    result.h = depth + 1;
+    result.unsolved_before = static_cast<uint64_t>(game.count_unsolved());
+
     // Marcin's word: think of h as the number of priorities of the
     // opponent... PLUS ONE!
     t = t_val;
     h = depth + 1;  // FIXME: This is Guillermo's hack, the +1
     k = k_val;  // Maybe possible: std::min(t + 2, h);
+
+    lift_count = 0;
+    lift_attempt = 0;
 
 #ifndef NDEBUG
     logger << "Strahler-tree parameters for player " << player << ": k = " << k << ", t = " << t << ", h = " << h << std::endl;
@@ -831,6 +912,11 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
         logger << std::endl;
     }
 #endif
+
+    // Pressure telemetry covers only the initial-lifting fixed point below;
+    // the strategy-extraction re-lift further down must not pollute it (see
+    // the active_pressure_stats = nullptr reset before that pass).
+    active_pressure_stats = &result.pressure;
 
     for (int n=nodecount()-1; n>=0; n--) {
         if (disabled[n]) continue;
@@ -872,6 +958,10 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
      * Derive strategies.
      */
 
+    // This re-lifts every vertex to extract strategies, not to explore the
+    // fixed point -- it must not be counted as scheduling pressure.
+    active_pressure_stats = nullptr;
+
     for (int v=0; v<nodecount(); v++) {
         if (disabled[v]) continue;
         if (pm[v].nlanes == 0 or pm[v].levels[0] != TOP_SENTINEL) {
@@ -909,6 +999,11 @@ STRPM_SIMDSolver::run(int t_val, int k_val, int depth, int player)
     }
 
     Solver::flush();
+
+    result.unsolved_after = static_cast<uint64_t>(game.count_unsolved());
+    result.lifts = static_cast<uint64_t>(lift_count);
+    result.lift_attempts = static_cast<uint64_t>(lift_attempt);
+    return result;
 }
 
 void
@@ -927,16 +1022,13 @@ STRPM_SIMDSolver::run()
 
     // Representable region of the SIMD encoding. Even with the uint16
     // unification, bitstrings are hard-capped at 8 bits (the mask/countl_one
-    // logic uses a literal 8), so t <= 7; there are 8 SIMD lanes and
-    // nlanes == k-1, so k <= 9. Beyond this the encoding would silently
-    // overflow, so we cap the (k,t) search here and hand any still-unsolved
-    // remainder to a complete solver (tangle learning) after the loop.
-    static constexpr int STRPM_SIMD_BITSTRING_BITS = 8; // bitstrings capped at 8 bits
-    static constexpr int STRPM_SIMD_LANES          = 8; // simd_u16x8 -> 8 lanes
-    const int t_repr = STRPM_SIMD_BITSTRING_BITS - 1;   // t <= 7
-    const int k_repr = STRPM_SIMD_LANES + 1;            // k <= 9  (nlanes = k-1 <= 8)
-    t_max = std::min(t_max, t_repr);
-    k_max = std::min(k_max, k_repr);
+    // logic uses a literal 8), so t <= STRPM_SIMD_T_MAX; there are 8 SIMD
+    // lanes and nlanes == k-1, so k <= STRPM_SIMD_K_MAX. Beyond this the
+    // encoding would silently overflow, so we cap the (k,t) search here and
+    // hand any still-unsolved remainder to a complete solver (tangle
+    // learning) after the loop.
+    t_max = std::min(t_max, STRPM_SIMD_T_MAX);
+    k_max = std::min(k_max, STRPM_SIMD_K_MAX);
 
     // create datastructures
     Q.resize(nodecount());
@@ -978,7 +1070,7 @@ STRPM_SIMDSolver::run()
         pq.pop();
 
         // Step 2: Reset the game - we want to know whether this combination can solve the game on its own
-        lift_count = 0, lift_attempt = 0;
+        // (lift_count/lift_attempt are reset inside run_attempt() at entry)
         uint64_t c;
 
 #if ALWAYS_RESET
@@ -993,7 +1085,8 @@ STRPM_SIMDSolver::run()
         // Step 3: Actually do the solving
         if (ODDFIRST) {
             // run odd counters
-            run(t_val, k_val, h1, 1);
+            StrpmAttemptResult odd_result = run_attempt(t_val, k_val, h1, 1);
+            (void)odd_result;
             c = game.count_unsolved();
 #ifndef NDEBUG
             logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
@@ -1002,7 +1095,8 @@ STRPM_SIMDSolver::run()
             if (c != 0)
             {
                 // run even counters
-                run(t_val, k_val, h0, 0);
+                StrpmAttemptResult even_result = run_attempt(t_val, k_val, h0, 0);
+                (void)even_result;
                 c = game.count_unsolved();
 #ifndef NDEBUG
                 logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
@@ -1011,7 +1105,8 @@ STRPM_SIMDSolver::run()
 
         } else {
             // run even counters
-            run(t_val, k_val, h0, 0);
+            StrpmAttemptResult even_result = run_attempt(t_val, k_val, h0, 0);
+            (void)even_result;
             c = game.count_unsolved();
 #ifndef NDEBUG
             logger << "after even, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
@@ -1020,7 +1115,8 @@ STRPM_SIMDSolver::run()
             if (c != 0)
             {
                 // run odd counters
-                run(t_val, k_val, h1, 1);
+                StrpmAttemptResult odd_result = run_attempt(t_val, k_val, h1, 1);
+                (void)odd_result;
                 c = game.count_unsolved();
 #ifndef NDEBUG
                 logger << "after odd, " << std::setw(9) << lift_count << " lifts, " << std::setw(9) << lift_attempt << " lift attempts, " << c << " unsolved left." << std::endl;
@@ -1054,14 +1150,14 @@ STRPM_SIMDSolver::run()
     }
 
     // Fallback: the (k,t) search above is capped at the representable region
-    // (k <= k_repr, t <= t_repr). If it drained without solving the whole game,
-    // hand the remaining unsolved subgame to a complete solver. All vertices
-    // strpm-simd already solved are in <disabled>, so tangle learning only
-    // finishes what is left.
+    // (k <= STRPM_SIMD_K_MAX, t <= STRPM_SIMD_T_MAX). If it drained without
+    // solving the whole game, hand the remaining unsolved subgame to a
+    // complete solver. All vertices strpm-simd already solved are in
+    // <disabled>, so tangle learning only finishes what is left.
     if (game.count_unsolved() != 0)
     {
-        logger << "strpm-simd exhausted representable parameters (k <= " << k_repr
-               << ", t <= " << t_repr << ") with " << game.count_unsolved()
+        logger << "strpm-simd exhausted representable parameters (k <= " << STRPM_SIMD_K_MAX
+               << ", t <= " << STRPM_SIMD_T_MAX << ") with " << game.count_unsolved()
                << " vertices unsolved; falling back to tangle learning." << std::endl;
         solveRemainderWith("tl");
     }
