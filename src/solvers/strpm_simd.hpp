@@ -126,6 +126,43 @@ static_assert(offsetof(NodePM, masks)  == 16);
 static_assert(offsetof(NodePM, levels) == 32);
 static_assert(offsetof(NodePM, nlanes) == 48);
 
+// A progress measure in working form: the same three uint16 lane arrays as
+// NodePM, but held in SIMD registers rather than storage.
+//
+// These used to be solver members (tmp_*/best_*), which forced every
+// to_tmp()/compare() pair to round-trip through memory: the store side wrote
+// through `this`, and out-of-line compare() reloaded it. As a value type passed
+// by reference, the whole successor loop in lift() can stay in registers.
+struct Measure {
+    simd_u16x8 bits;
+    simd_u16x8 masks;
+    simd_u16x8 levels;
+    uint8_t nlanes;
+
+    inline void load(const NodePM& p) {
+        bits.copy_from(&p.bits[0], stdx::element_aligned);
+        masks.copy_from(&p.masks[0], stdx::element_aligned);
+        levels.copy_from(&p.levels[0], stdx::element_aligned);
+        nlanes = p.nlanes;
+    }
+
+    inline void store(NodePM& p) const {
+        bits.copy_to(&p.bits[0], stdx::element_aligned);
+        masks.copy_to(&p.masks[0], stdx::element_aligned);
+        levels.copy_to(&p.levels[0], stdx::element_aligned);
+        p.nlanes = nlanes;
+    }
+
+    // Zero out inactive lanes' bits and masks
+    inline void fill_inactive() {
+        simd_u16x8_mask inactive = LANE_INDICES >= simd_u16x8(nlanes);
+        stdx::where(inactive, bits) = simd_u16x8(0);
+        stdx::where(inactive, masks) = simd_u16x8(0);
+    }
+
+    inline bool is_top() const { return nlanes > 0 and levels[0] == TOP_SENTINEL; }
+};
+
 namespace pg {
 
 class STRPM_SIMDSolver : public Solver
@@ -152,16 +189,6 @@ protected:
     // h is asserted < 32767 at startup so uint16_t always suffices.
     std::vector<NodePM>   pm;
 
-    simd_u16x8 tmp_bits;
-    simd_u16x8 tmp_masks;
-    simd_u16x8 tmp_levels;
-    uint8_t tmp_nlanes;
-
-    simd_u16x8 best_bits;
-    simd_u16x8 best_masks;
-    simd_u16x8 best_levels;
-    uint8_t best_nlanes;
-
     uintqueue Q;
     bitset dirty;
 
@@ -173,58 +200,16 @@ protected:
     // pre-reserved to nodecount() to avoid per-call heap allocation.
     std::vector<int> succs;
 
-    // Copy pm[idx] into tmp
-    inline void to_tmp(int idx) {
-        tmp_bits.copy_from(&pm[idx].bits[0], stdx::element_aligned);
-        tmp_masks.copy_from(&pm[idx].masks[0], stdx::element_aligned);
-        tmp_levels.copy_from(&pm[idx].levels[0], stdx::element_aligned);
-        tmp_nlanes = pm[idx].nlanes;
-    }
-    // Copy tmp into pm[idx]
-    inline void from_tmp(int idx) {
-        tmp_bits.copy_to(&pm[idx].bits[0], stdx::element_aligned);
-        tmp_masks.copy_to(&pm[idx].masks[0], stdx::element_aligned);
-        tmp_levels.copy_to(&pm[idx].levels[0], stdx::element_aligned);
-        pm[idx].nlanes = tmp_nlanes;
-    }
-    // Copy pm[idx] into best
-    inline void to_best(int idx) {
-        best_bits.copy_from(&pm[idx].bits[0], stdx::element_aligned);
-        best_masks.copy_from(&pm[idx].masks[0], stdx::element_aligned);
-        best_levels.copy_from(&pm[idx].levels[0], stdx::element_aligned);
-        best_nlanes = pm[idx].nlanes;
-    }
-    // Copy best into pm[idx]
-    inline void from_best(int idx) {
-        best_bits.copy_to(&pm[idx].bits[0], stdx::element_aligned);
-        best_masks.copy_to(&pm[idx].masks[0], stdx::element_aligned);
-        best_levels.copy_to(&pm[idx].levels[0], stdx::element_aligned);
-        pm[idx].nlanes = best_nlanes;
-    }
-    // Copy tmp into best
-    inline void tmp_to_best() {
-        best_bits = tmp_bits;
-        best_masks = tmp_masks;
-        best_levels = tmp_levels;
-        best_nlanes = tmp_nlanes;
-    }
-
-    // Zero out inactive lanes' bits and masks
-    inline void fill_inactive_tmp() {
-        simd_u16x8_mask inactive = LANE_INDICES >= simd_u16x8(tmp_nlanes);
-        stdx::where(inactive, tmp_bits) = simd_u16x8(0);
-        stdx::where(inactive, tmp_masks) = simd_u16x8(0);
-    }
-
-    // Render pm[idx] to given ostream
+    // Render the stored measure of vertex idx to given ostream
     void stream_pm(std::ostream &out, int idx);
-    // Render SIMD to given ostream
-    void stream_simd(std::ostream &out, simd_u16x8& bits, simd_u16x8& masks, simd_u16x8& levels, uint8_t nlanes);
+    // Render a measure to given ostream
+    void stream_simd(std::ostream &out, const Measure& m);
 
     // Compare tmp to best
-    int compare(int pindex);
+    __attribute__((always_inline)) int compare(const Measure& tmp, const Measure& best, int pindex);
 
-    void prog_tmp(int pindex, int h);
+    // Set m := min { x | x >_p m }
+    void prog(Measure& m, int pindex, int h);
 
     // Lift node, triggered by change to target
     bool lift(int node, int target, int &str, int pl);
@@ -249,6 +234,16 @@ protected:
 
     int lift_count = 0;
     int lift_attempt = 0;
+
+    // Where lift() spends its calls. Plain counter increments, negligible next
+    // to the measure loads they account for; reported per attempt at trace >= 1.
+    uint64_t stat_lift_top = 0;       // returned early, vertex already Top
+    uint64_t stat_lift_fast = 0;      // owner(v) == pl and a target was given
+    uint64_t stat_lift_scan = 0;      // scanned the whole successor list
+    uint64_t stat_succ_scanned = 0;   // successors examined by the scanning path
+    uint64_t stat_lift_sweep = 0;     // lift attempts from the initial sweep
+    uint64_t stat_lift_worklist = 0;  // lift attempts from the worklist phase
+    uint64_t stat_lift_strategy = 0;  // lift calls from strategy derivation
 
     void run(int t_val, int k_val, int depth, int player);
 };
